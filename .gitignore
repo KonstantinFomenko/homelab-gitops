@@ -1,0 +1,12 @@
+# Helm: downloaded chart dependencies (versions pinned in Chart.lock)
+platform/*/charts/
+*.tgz
+
+# Local kubeconfig and secrets never go here
+*kubeconfig*
+*.env
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
