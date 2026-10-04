@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: smoke-test
-data:
-  purpose: "temporary check that apps/ is picked up and pruned"
