@@ -42,13 +42,13 @@ argo-cd:
 
   server:
     resources:
-      requests: { cpu: 20m, memory: 96Mi } # peak: 11m / 75Mi
-      limits: { cpu: 500m, memory: 192Mi }
+      requests: { cpu: 20m, memory: 96Mi } # peak: 11m / 75Mi; limit leaves room for UI on big apps
+      limits: { cpu: 500m, memory: 256Mi }
 
   redis:
     resources:
-      requests: { cpu: 10m, memory: 32Mi } # peak: 8m / 29Mi
-      limits: { cpu: 200m, memory: 64Mi }
+      requests: { cpu: 10m, memory: 32Mi } # peak: 8m / 29Mi; no maxmemory, cache grows with apps
+      limits: { cpu: 200m, memory: 128Mi }
 
   applicationSet:
     resources:
@@ -58,5 +58,5 @@ argo-cd:
   # Hook job that creates the redis password secret.
   redisSecretInit:
     resources:
-      requests: { cpu: 10m, memory: 32Mi }
-      limits: { cpu: 200m, memory: 64Mi }
+      requests: { cpu: 10m, memory: 32Mi } # full argocd binary, not measured
+      limits: { cpu: 200m, memory: 128Mi }
