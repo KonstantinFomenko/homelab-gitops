@@ -1,0 +1,60 @@
+# Values for the argo-cd dependency live under the `argo-cd:` key.
+# The same chart is rendered by the manual bootstrap and by Argo CD itself (apps/argocd.yaml),
+# so this file is the only place where Argo CD is configured.
+argo-cd:
+  global:
+    # All Argo CD components run on the control-plane node (rpi-01): it hosts k3s server + GitOps,
+    # rpi-02/03 stay for apps and data. Overriding nodeSelector drops the chart default, so os is set again.
+    nodeSelector:
+      node-role: control-plane
+      kubernetes.io/os: linux
+    tolerations:
+      - key: node-role
+        operator: Equal
+        value: control-plane
+        effect: NoSchedule
+
+  # Not needed: no SSO, no notifications yet (alerts come with kube-prometheus-stack).
+  dex:
+    enabled: false
+  notifications:
+    enabled: false
+
+  # Single redis without HA and without persistence.
+  redis-ha:
+    enabled: false
+
+  controller:
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: "1", memory: 512Mi }
+
+  repoServer:
+    # Repo cache in an on-disk emptyDir (SD card): memory-backed cache would count against the
+    # container memory limit. Clones of a few small repos — small writes.
+    emptyDir:
+      sizeLimit: 512Mi
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: "1", memory: 512Mi }
+
+  server:
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 256Mi }
+
+  redis:
+    resources:
+      requests: { cpu: 20m, memory: 32Mi }
+      limits: { cpu: 200m, memory: 128Mi }
+
+  applicationSet:
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { cpu: 200m, memory: 128Mi }
+
+  # Hook job that creates the redis password secret.
+  redisSecretInit:
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { cpu: 200m, memory: 128Mi }

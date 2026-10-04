@@ -1,0 +1,9 @@
+apiVersion: v2
+name: argocd
+description: Argo CD for the home lab — umbrella chart around the official argo-cd chart
+type: application
+version: 0.1.0
+dependencies:
+  - name: argo-cd
+    version: 10.9.6
+    repository: https://argoproj.github.io/argo-helm

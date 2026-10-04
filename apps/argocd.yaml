@@ -1,0 +1,24 @@
+# Argo CD manages itself. Deliberately NO resources-finalizer and Prune=false:
+# renaming or deleting this file must never cascade-delete Argo CD.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd # must match the release name used by the bootstrap `helm template argocd ...`
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KonstantinFomenko/homelab-gitops.git
+    targetRevision: main
+    path: platform/argocd
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: false
+    syncOptions:
+      - ServerSideApply=true
