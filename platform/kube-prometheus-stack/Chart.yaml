@@ -1,0 +1,9 @@
+apiVersion: v2
+name: kube-prometheus-stack
+description: Prometheus, Alertmanager and Grafana for the home lab — umbrella chart around kube-prometheus-stack
+type: application
+version: 0.1.0
+dependencies:
+  - name: kube-prometheus-stack
+    version: 91.9.0
+    repository: https://prometheus-community.github.io/helm-charts

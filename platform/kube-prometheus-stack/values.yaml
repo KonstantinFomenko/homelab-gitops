@@ -1,0 +1,194 @@
+# Values for the kube-prometheus-stack dependency live under the `kube-prometheus-stack:` key.
+# Rendered by Argo CD as release `kube-prometheus-stack` in namespace `monitoring` (apps/kube-prometheus-stack.yaml).
+#
+# Layout: everything except node-exporter runs on the data node (rpi-03, node-role=data).
+# Storage: no PVCs. Prometheus TSDB, Alertmanager state and Grafana's sqlite live in tmpfs —
+# the lab never writes metrics to SD cards; history is lost on pod restart or power loss.
+kube-prometheus-stack:
+
+  # --- Targets that k3s does not expose --------------------------------------------------------
+  # k3s runs controller-manager and scheduler inside one process bound to 127.0.0.1, has no etcd
+  # with a single server (sqlite/kine), and kube-proxy is replaced by Cilium (kubeProxyReplacement).
+  # Exposing them needs k3s flags, which are owned by the node setup, not by this repository.
+  kubeControllerManager:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeProxy:
+    enabled: false
+
+  defaultRules:
+    rules:
+      # Rule groups for the targets disabled above — they would only produce "target down" noise.
+      etcd: false
+      kubeControllerManager: false
+      kubeProxy: false
+      kubeSchedulerAlerting: false
+      kubeSchedulerRecording: false
+
+  # --- Lab rules: the single place for cluster-level rules of this lab -------------------------
+  # Application rules (e.g. slo-operator) ship their own PrometheusRule objects instead.
+  additionalPrometheusRulesMap:
+    homelab:
+      groups:
+        - name: argocd
+          rules:
+            - alert: ArgoCDApplicationNotSyncedOrHealthy
+              expr: argocd_app_info{sync_status!="Synced"} or argocd_app_info{health_status!="Healthy"}
+              for: 15m
+              labels:
+                severity: warning
+              annotations:
+                summary: Argo CD Application {{ $labels.name }} is {{ $labels.sync_status }}/{{ $labels.health_status }}
+                description: Not Synced/Healthy for 15 minutes. Check with `kubectl describe application {{ $labels.name }} -n argocd`.
+            - alert: ArgoCDControllerMetricsAbsent
+              # A dead application controller keeps the last Application status in place,
+              # so the rule above would stay silent. No controller metrics = no status at all.
+              expr: absent(up{job="argocd-application-controller-metrics"} == 1)
+              for: 10m
+              labels:
+                severity: warning
+              annotations:
+                summary: No metrics from the Argo CD application controller
+                description: The controller is down or not scraped; Application statuses are stale.
+        - name: monitoring
+          rules:
+            - alert: MonitoringContainerOOMKilled
+              # After an OOM the in-memory TSDB is empty, so restart-based alerts never fire.
+              # kube-state-metrics reports the last termination reason, which survives the restart.
+              expr: kube_pod_container_status_last_terminated_reason{namespace="monitoring",reason="OOMKilled"} == 1
+              labels:
+                severity: warning
+              annotations:
+                summary: "{{ $labels.pod }}/{{ $labels.container }} was OOMKilled"
+                description: Memory limit too low (tmpfs counts against it). Metrics history was lost.
+
+  # --- Prometheus Operator ---------------------------------------------------------------------
+  prometheusOperator:
+    # The webhooks' certificates are made by Helm hook jobs (pre-install create, post-install patch),
+    # which under Argo CD give a permanent diff and a failing patch job. Rules are validated in CI
+    # of their owners instead (promtool check rules).
+    admissionWebhooks:
+      enabled: false
+    # The operator's TLS uses the certificate secret created by the webhook jobs — off with them.
+    tls:
+      enabled: false
+    nodeSelector:
+      node-role: data
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { cpu: 200m, memory: 128Mi }
+    prometheusConfigReloader:
+      # Sidecar in the Prometheus and Alertmanager pods.
+      resources:
+        requests: { cpu: 5m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 32Mi }
+
+  # --- Prometheus ------------------------------------------------------------------------------
+  prometheus:
+    # Argo CD metrics. The argo-cd chart only exposes plain metrics Services (metrics.enabled),
+    # so Argo CD itself never depends on the monitoring CRDs.
+    additionalServiceMonitors:
+      - name: argocd
+        selector:
+          matchExpressions:
+            - key: app.kubernetes.io/name
+              operator: In
+              values: [argocd-metrics, argocd-repo-server-metrics, argocd-server-metrics]
+        namespaceSelector:
+          matchNames: [argocd]
+        endpoints:
+          - port: http-metrics
+
+    prometheusSpec:
+      replicas: 1
+      nodeSelector:
+        node-role: data
+
+      # Pick up every ServiceMonitor/PodMonitor/PrometheusRule/Probe in every namespace, without labels.
+      # This is the contract for applications (slo-operator) — see README, Monitoring.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      probeSelectorNilUsesHelmValues: false
+      serviceMonitorNamespaceSelector: {}
+      podMonitorNamespaceSelector: {}
+      ruleNamespaceSelector: {}
+      probeNamespaceSelector: {}
+
+      # TSDB in tmpfs. retentionSize stays below sizeLimit so Prometheus trims before the volume is full.
+      retention: 3d
+      retentionSize: 768MB
+      storageSpec:
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi
+
+      # tmpfs counts against the container memory limit: limit = working memory + sizeLimit (1Gi).
+      resources:
+        requests: { cpu: 200m, memory: 1Gi }
+        limits: { cpu: "1", memory: 2560Mi }
+
+  # --- Alertmanager ----------------------------------------------------------------------------
+  # Receiver is the chart default `null`: alerts are visible in the UI and API (/api/v2/alerts).
+  # Delivery outside the cluster comes later with a secret from Vault.
+  alertmanager:
+    alertmanagerSpec:
+      replicas: 1
+      nodeSelector:
+        node-role: data
+      # Silences live here and are lost on restart — never silence, disable rules in values instead.
+      storage:
+        emptyDir:
+          medium: Memory
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 200m, memory: 128Mi }
+
+  # --- Grafana ---------------------------------------------------------------------------------
+  grafana:
+    nodeSelector:
+      node-role: data
+    # Admin credentials from a Secret created by hand before the first sync (README, Bootstrap).
+    # The chart's default password is public and never used.
+    admin:
+      existingSecret: grafana-admin
+      userKey: admin-user
+      passwordKey: admin-password
+    # sqlite (sessions, settings) in tmpfs; dashboards come from ConfigMaps via the sidecar.
+    persistence:
+      enabled: false
+      inMemory:
+        enabled: true
+        sizeLimit: 64Mi
+    # Grafana + two sidecars (dashboards, datasources): 50m/192Mi requests, 500m/384Mi limits in total.
+    resources:
+      requests: { cpu: 30m, memory: 128Mi }
+      limits: { cpu: 300m, memory: 256Mi }
+    # `helm test` pod: Helm-only, never run under Argo CD.
+    testFramework:
+      enabled: false
+    sidecar:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+
+  # --- Exporters -------------------------------------------------------------------------------
+  kube-state-metrics:
+    nodeSelector:
+      node-role: data
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { cpu: 200m, memory: 128Mi }
+
+  # DaemonSet on all three nodes (the chart tolerates every NoSchedule taint, incl. rpi-01's).
+  prometheus-node-exporter:
+    # Scraped over the pod network: nodes keep UFW `default deny` without a rule for 9100.
+    # Cost: network counters are those of the pod's network namespace, not of the node's interfaces.
+    # hostPID and read-only host /proc, /sys and / stay — CPU, memory and filesystems are the node's.
+    hostNetwork: false
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { cpu: 200m, memory: 64Mi }
