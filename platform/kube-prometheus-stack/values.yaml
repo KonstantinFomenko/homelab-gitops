@@ -167,10 +167,16 @@ kube-prometheus-stack:
     resources:
       requests: { cpu: 30m, memory: 128Mi }
       limits: { cpu: 300m, memory: 256Mi }
+    # The chart's ClusterRole lets the sidecars read Secrets in every namespace.
+    # Keep Grafana to its own namespace: a Role, and dashboards only from `monitoring`.
+    rbac:
+      namespaced: true
     # `helm test` pod: Helm-only, never run under Argo CD.
     testFramework:
       enabled: false
     sidecar:
+      dashboards:
+        searchNamespace: monitoring
       resources:
         requests: { cpu: 10m, memory: 32Mi }
         limits: { cpu: 100m, memory: 64Mi }
