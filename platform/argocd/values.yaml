@@ -24,23 +24,33 @@ argo-cd:
   redis-ha:
     enabled: false
 
-  # Resources: requests ≈ observed cold-start peak on rpi-01, memory limits with headroom
-  # (repo-server most: rendering big charts like kube-prometheus-stack). Revisit after its first sync.
+  # Resources: requests ≈ observed cold-start peak on rpi-01, memory limits with headroom.
+  # controller and repo-server limits raised to 1Gi for the first sync of kube-prometheus-stack
+  # (hundreds of objects, big CRDs); to be lowered to the measured peak afterwards.
+  #
+  # Metrics: plain `<component>-metrics` Services only. Their ServiceMonitor lives in
+  # platform/kube-prometheus-stack, so Argo CD never depends on the monitoring CRDs.
   controller:
+    metrics:
+      enabled: true
     resources:
       requests: { cpu: 100m, memory: 256Mi } # peak after reboot: 205m / 253Mi
-      limits: { cpu: "1", memory: 512Mi }
+      limits: { cpu: "1", memory: 1Gi }
 
   repoServer:
+    metrics:
+      enabled: true
     # Repo cache in an on-disk emptyDir (SD card): memory-backed cache would count against the
     # container memory limit. Clones of a few small repos — small writes.
     emptyDir:
       sizeLimit: 512Mi
     resources:
       requests: { cpu: 50m, memory: 128Mi } # peak: 440m / 124Mi
-      limits: { cpu: "1", memory: 640Mi }
+      limits: { cpu: "1", memory: 1Gi }
 
   server:
+    metrics:
+      enabled: true
     resources:
       requests: { cpu: 20m, memory: 96Mi } # peak: 11m / 75Mi; limit leaves room for UI on big apps
       limits: { cpu: 500m, memory: 256Mi }
@@ -51,6 +61,8 @@ argo-cd:
       limits: { cpu: 200m, memory: 128Mi }
 
   applicationSet:
+    metrics:
+      enabled: true
     resources:
       requests: { cpu: 10m, memory: 48Mi } # peak: 4m / 38Mi
       limits: { cpu: 200m, memory: 96Mi }
