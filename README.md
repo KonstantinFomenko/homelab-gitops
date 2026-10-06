@@ -110,7 +110,7 @@ until metrics are shipped to object storage. Hence: **no silences** — a noisy 
 **Resources** are set from measured peaks (a cold start of all nodes included): requests ≈ steady use,
 memory limits ≈ 1.5–2× the peak; the measurements are next to each value in `values.yaml`.
 Prometheus is the big one: ~0.5 GiB working memory plus the TSDB tmpfs (limit 2.5Gi), then Grafana
-(~455Mi with its sqlite tmpfs). About 80k series. Signal to rebalance: `node_memory_MemAvailable`
+(~455Mi with its sqlite tmpfs). 80–100k series (relabel apiserver histograms if it grows past that). Signal to rebalance: `node_memory_MemAvailable`
 below 1 GiB on the data node.
 
 **Not collected on k3s.** controller-manager and scheduler run inside the k3s process bound to
@@ -156,8 +156,9 @@ The chart's default password is never used. No anonymous access.
 - **Firing alerts** (for health checks): Alertmanager API through the port-forward above,
   `GET http://localhost:9093/api/v2/alerts`. **No `Watchdog` in the answer means monitoring is
   broken**, not "no alerts": if Prometheus is down, Alertmanager resolves everything within minutes.
-- **Applications with ServiceMonitor/PodMonitor/PrometheusRule:** picked up in any namespace without
-  any labels (all `*Selector`/`*NamespaceSelector` are `{}`).
+- **Applications with ServiceMonitor/PodMonitor/PrometheusRule/Probe:** picked up in any namespace
+  without any labels (their selectors and namespace selectors are `{}`). `ScrapeConfig` is the
+  exception: it still needs the label `release: kube-prometheus-stack` (chart default).
 - **History:** rule windows must not exceed the retention (3d), and after a Prometheus restart long
   windows are unreliable until they refill. 28–30 day SLO periods and error budgets need remote write.
 - **NetworkPolicy of an application:** Prometheus lives in namespace `monitoring`; allow ingress from
