@@ -123,6 +123,14 @@ Argo CD. Owners of `PrometheusRule` objects validate them in CI (`promtool check
 exposes plain metrics Services; their ServiceMonitor is `prometheus.additionalServiceMonitors` there,
 so Argo CD never depends on the monitoring CRDs. `Watchdog` always fires — that is the heartbeat.
 
+**Disabled default rules** (`defaultRules` in `values.yaml`, each with its reason there). On a healthy
+cluster only `Watchdog` (and `InfoInhibitor`) fire; anything else is a real signal.
+
+| Rule / group | Why |
+|---|---|
+| groups `etcd`, `kubeControllerManager`, `kubeProxy`, `kubeSchedulerAlerting`, `kubeSchedulerRecording` | their targets do not exist on k3s (see above) |
+| `CPUThrottlingHigh` | small containers with CPU limits on a Pi are throttled in idle bursts; starvation still shows as `KubePodCrashLooping`/`KubePodNotReady` |
+
 ### Access
 
 No ingress. Over the private network:
