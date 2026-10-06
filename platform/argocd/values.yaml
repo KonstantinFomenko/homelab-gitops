@@ -24,9 +24,9 @@ argo-cd:
   redis-ha:
     enabled: false
 
-  # Resources: requests ≈ observed cold-start peak on rpi-01, memory limits with headroom.
-  # controller and repo-server limits raised to 1Gi for the first sync of kube-prometheus-stack
-  # (hundreds of objects, big CRDs); to be lowered to the measured peak afterwards.
+  # Resources: requests ≈ steady use on rpi-01, memory limits ≈ 1.5–2× the peak.
+  # Re-measured 2026-10-06 with kube-prometheus-stack, over 6.5 h incl. a cold start of all nodes:
+  # the old 512Mi controller limit would have OOMed (peak 519Mi).
   #
   # Metrics: plain `<component>-metrics` Services only. Their ServiceMonitor lives in
   # platform/kube-prometheus-stack, so Argo CD never depends on the monitoring CRDs.
@@ -34,8 +34,8 @@ argo-cd:
     metrics:
       enabled: true
     resources:
-      requests: { cpu: 100m, memory: 256Mi } # peak after reboot: 205m / 253Mi
-      limits: { cpu: "1", memory: 1Gi }
+      requests: { cpu: 100m, memory: 320Mi } # peak 519Mi (cold start), steady ~320Mi
+      limits: { cpu: "1", memory: 768Mi }
 
   repoServer:
     metrics:
@@ -45,26 +45,26 @@ argo-cd:
     emptyDir:
       sizeLimit: 512Mi
     resources:
-      requests: { cpu: 50m, memory: 128Mi } # peak: 440m / 124Mi
-      limits: { cpu: "1", memory: 1Gi }
+      requests: { cpu: 50m, memory: 128Mi } # peak 288Mi (cold start), steady ~120Mi
+      limits: { cpu: "1", memory: 512Mi }
 
   server:
     metrics:
       enabled: true
     resources:
-      requests: { cpu: 20m, memory: 96Mi } # peak: 11m / 75Mi; limit leaves room for UI on big apps
+      requests: { cpu: 20m, memory: 96Mi } # peak 8m / 71Mi; limit leaves room for UI on big apps
       limits: { cpu: 500m, memory: 256Mi }
 
   redis:
     resources:
-      requests: { cpu: 10m, memory: 32Mi } # peak: 8m / 29Mi; no maxmemory, cache grows with apps
+      requests: { cpu: 10m, memory: 32Mi } # peak 6m / 32Mi; no maxmemory, cache grows with apps
       limits: { cpu: 200m, memory: 128Mi }
 
   applicationSet:
     metrics:
       enabled: true
     resources:
-      requests: { cpu: 10m, memory: 48Mi } # peak: 4m / 38Mi
+      requests: { cpu: 10m, memory: 48Mi } # peak 2m / 46Mi
       limits: { cpu: 200m, memory: 96Mi }
 
   # Hook job that creates the redis password secret.

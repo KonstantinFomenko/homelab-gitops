@@ -83,11 +83,12 @@ kube-prometheus-stack:
       enabled: false
     nodeSelector:
       node-role: data
+    # Measured 2026-10-06 over 6.5 h incl. a cold start (peak / steady): operator 9m 80Mi / 79Mi.
     resources:
-      requests: { cpu: 20m, memory: 64Mi }
-      limits: { cpu: 200m, memory: 128Mi }
+      requests: { cpu: 20m, memory: 80Mi }
+      limits: { cpu: 200m, memory: 192Mi }
     prometheusConfigReloader:
-      # Sidecar in the Prometheus and Alertmanager pods.
+      # Sidecar in the Prometheus and Alertmanager pods. Peak 1m 13Mi.
       resources:
         requests: { cpu: 5m, memory: 16Mi }
         limits: { cpu: 100m, memory: 32Mi }
@@ -133,6 +134,7 @@ kube-prometheus-stack:
           sizeLimit: 1Gi
 
       # tmpfs counts against the container memory limit: limit = working memory + sizeLimit (1Gi).
+      # Peak 73m / 1152Mi with 6.5 h of TSDB; tmpfs grows up to retentionSize over 3 days — kept as is.
       resources:
         requests: { cpu: 200m, memory: 1Gi }
         limits: { cpu: "1", memory: 2560Mi }
@@ -150,7 +152,7 @@ kube-prometheus-stack:
         emptyDir:
           medium: Memory
       resources:
-        requests: { cpu: 10m, memory: 32Mi }
+        requests: { cpu: 10m, memory: 48Mi } # peak 1m / 42Mi
         limits: { cpu: 200m, memory: 128Mi }
 
   # --- Grafana ---------------------------------------------------------------------------------
@@ -169,11 +171,11 @@ kube-prometheus-stack:
       inMemory:
         enabled: true
         sizeLimit: 128Mi # Grafana 13's sqlite is ~52Mi right after start
-    # Grafana + two sidecars (dashboards, datasources). Start values 256Mi/64Mi were OOMKilled in a loop
-    # (Grafana steady ~193Mi; the 128Mi tmpfs counts here too); raised with headroom, measured values come later.
+    # Grafana + two sidecars (dashboards, datasources). Start values 256Mi/64Mi were OOMKilled in a loop.
+    # Peak 84m / 456Mi, steady ~455Mi (rss ~200Mi + page cache incl. the sqlite tmpfs).
     resources:
-      requests: { cpu: 30m, memory: 192Mi }
-      limits: { cpu: 300m, memory: 512Mi }
+      requests: { cpu: 30m, memory: 448Mi }
+      limits: { cpu: 300m, memory: 768Mi }
     # The chart's ClusterRole lets the sidecars read Secrets in every namespace.
     # Keep Grafana to its own namespace: a Role, and dashboards only from `monitoring`.
     rbac:
@@ -185,16 +187,17 @@ kube-prometheus-stack:
       dashboards:
         searchNamespace: monitoring
       resources:
-        requests: { cpu: 10m, memory: 64Mi }
-        limits: { cpu: 100m, memory: 192Mi }
+        # Peak 54m / 101Mi (dashboards), 53m / 73Mi (datasources).
+        requests: { cpu: 10m, memory: 96Mi }
+        limits: { cpu: 200m, memory: 192Mi }
 
   # --- Exporters -------------------------------------------------------------------------------
   kube-state-metrics:
     nodeSelector:
       node-role: data
     resources:
-      requests: { cpu: 20m, memory: 64Mi }
-      limits: { cpu: 200m, memory: 128Mi }
+      requests: { cpu: 20m, memory: 80Mi } # peak 2m / 70Mi
+      limits: { cpu: 200m, memory: 160Mi }
 
   # DaemonSet on all three nodes (the chart tolerates every NoSchedule taint, incl. rpi-01's).
   prometheus-node-exporter:
@@ -203,5 +206,5 @@ kube-prometheus-stack:
     # hostPID and read-only host /proc, /sys and / stay — CPU, memory and filesystems are the node's.
     hostNetwork: false
     resources:
-      requests: { cpu: 10m, memory: 32Mi }
+      requests: { cpu: 10m, memory: 32Mi } # peak 5m / 26Mi
       limits: { cpu: 200m, memory: 64Mi }
