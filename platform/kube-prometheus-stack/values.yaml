@@ -27,6 +27,12 @@ kube-prometheus-stack:
       kubeProxy: false
       kubeSchedulerAlerting: false
       kubeSchedulerRecording: false
+    # Single alerts that fire on a healthy cluster. Each one: why, and what still covers the risk.
+    disabled:
+      # Small containers with CPU limits on a Pi (sidecars, config-reloader, node-exporter) spend
+      # 25–95% of CFS periods throttled in short bursts while idle. Info severity, no action to take;
+      # real starvation shows up as failing probes and restarts (KubePodCrashLooping, KubePodNotReady).
+      CPUThrottlingHigh: true
 
   # --- Lab rules: the single place for cluster-level rules of this lab -------------------------
   # Application rules (e.g. slo-operator) ship their own PrometheusRule objects instead.
