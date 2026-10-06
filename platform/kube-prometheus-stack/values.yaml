@@ -163,10 +163,11 @@ kube-prometheus-stack:
       inMemory:
         enabled: true
         sizeLimit: 64Mi
-    # Grafana + two sidecars (dashboards, datasources): 50m/192Mi requests, 500m/384Mi limits in total.
+    # Grafana + two sidecars (dashboards, datasources). Start values 256Mi/64Mi were OOMKilled in a loop
+    # (Grafana steady ~193Mi, tmpfs counts here too); raised with headroom, measured values come later.
     resources:
-      requests: { cpu: 30m, memory: 128Mi }
-      limits: { cpu: 300m, memory: 256Mi }
+      requests: { cpu: 30m, memory: 192Mi }
+      limits: { cpu: 300m, memory: 512Mi }
     # The chart's ClusterRole lets the sidecars read Secrets in every namespace.
     # Keep Grafana to its own namespace: a Role, and dashboards only from `monitoring`.
     rbac:
@@ -178,8 +179,8 @@ kube-prometheus-stack:
       dashboards:
         searchNamespace: monitoring
       resources:
-        requests: { cpu: 10m, memory: 32Mi }
-        limits: { cpu: 100m, memory: 64Mi }
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { cpu: 100m, memory: 192Mi }
 
   # --- Exporters -------------------------------------------------------------------------------
   kube-state-metrics:
