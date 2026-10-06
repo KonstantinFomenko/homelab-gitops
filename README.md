@@ -107,6 +107,12 @@ Metrics history, silences and Grafana sessions are lost on a pod restart or powe
 until metrics are shipped to object storage. Hence: **no silences** — a noisy rule is disabled in
 `values.yaml` with a comment instead.
 
+**Resources** are set from measured peaks (a cold start of all nodes included): requests ≈ steady use,
+memory limits ≈ 1.5–2× the peak; the measurements are next to each value in `values.yaml`.
+Prometheus is the big one: ~0.5 GiB working memory plus the TSDB tmpfs (limit 2.5Gi), then Grafana
+(~455Mi with its sqlite tmpfs). About 80k series. Signal to rebalance: `node_memory_MemAvailable`
+below 1 GiB on the data node.
+
 **Not collected on k3s.** controller-manager and scheduler run inside the k3s process bound to
 `127.0.0.1`, there is no etcd (single server, sqlite/kine), kube-proxy is replaced by Cilium.
 Those targets and their rule groups are disabled. Exposing them would need k3s flags, which belong
