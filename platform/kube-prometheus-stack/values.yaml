@@ -162,9 +162,9 @@ kube-prometheus-stack:
       enabled: false
       inMemory:
         enabled: true
-        sizeLimit: 64Mi
+        sizeLimit: 128Mi # Grafana 13's sqlite is ~52Mi right after start
     # Grafana + two sidecars (dashboards, datasources). Start values 256Mi/64Mi were OOMKilled in a loop
-    # (Grafana steady ~193Mi, tmpfs counts here too); raised with headroom, measured values come later.
+    # (Grafana steady ~193Mi; the 128Mi tmpfs counts here too); raised with headroom, measured values come later.
     resources:
       requests: { cpu: 30m, memory: 192Mi }
       limits: { cpu: 300m, memory: 512Mi }
