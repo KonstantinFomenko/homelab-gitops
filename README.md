@@ -10,6 +10,7 @@ upgrading Argo CD is a pull request.
 bootstrap/root.yaml          # root Application — the only manifest ever applied by hand
 apps/                        # one Application per component; root syncs everything here
   argocd.yaml                #   → platform/argocd (Argo CD manages itself)
+  kube-prometheus-stack.yaml #   → platform/kube-prometheus-stack (monitoring)
 platform/<component>/        # the component itself
   Chart.yaml / Chart.lock    #   umbrella Helm chart: upstream chart as a dependency, version pinned here
   values.yaml                #   all settings, under the dependency's key
@@ -27,6 +28,7 @@ cluster: Argo CD is the only owner of its objects; `helm install/upgrade` are ne
 |---|---|---|
 | `root` | `apps/` | automated, `selfHeal`, `prune` |
 | `argocd` | `platform/argocd` | automated, `selfHeal`, no prune; no finalizer, `Prune=false` |
+| `kube-prometheus-stack` | `platform/kube-prometheus-stack` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
 
 ## Bootstrap from scratch (= disaster recovery)
 
@@ -37,6 +39,9 @@ kubectl create namespace argocd
 helm dependency build platform/argocd
 helm template argocd platform/argocd -n argocd | kubectl apply --server-side --force-conflicts -f -
 kubectl -n argocd rollout status deploy --timeout=5m
+kubectl create namespace monitoring       # Grafana admin Secret must exist before its first sync
+kubectl create secret generic grafana-admin -n monitoring \
+  --from-literal=admin-user=admin --from-literal=admin-password='<from the password manager>'
 kubectl apply -f bootstrap/root.yaml      # the only manual apply, once
 ```
 
@@ -87,6 +92,88 @@ manager, and the secret is deleted (as the Argo CD docs recommend).
 resources) only on components **without CRDs and without data**. Components with CRDs or data
 (e.g. Vault, External Secrets Operator) get no finalizer: deleting the file leaves the resources in
 the cluster, data is removed by hand. `argocd` itself never has one.
+
+## Monitoring
+
+[kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack)
+in namespace `monitoring`: Prometheus Operator, one Prometheus, one Alertmanager, Grafana,
+kube-state-metrics and node-exporter. Everything except node-exporter runs on the data node
+(`node-role=data`); node-exporter is a DaemonSet on all three nodes.
+
+**Nothing is written to SD cards.** No PVCs: Prometheus TSDB (`retention: 3d`, `retentionSize: 768MB`,
+tmpfs `sizeLimit: 1Gi`), Alertmanager state and Grafana's sqlite live in memory-backed `emptyDir`.
+tmpfs counts against the container memory limit, so Prometheus' limit = working memory + 1Gi.
+Metrics history, silences and Grafana sessions are lost on a pod restart or power loss — accepted
+until metrics are shipped to object storage. Hence: **no silences** — a noisy rule is disabled in
+`values.yaml` with a comment instead.
+
+**Not collected on k3s.** controller-manager and scheduler run inside the k3s process bound to
+`127.0.0.1`, there is no etcd (single server, sqlite/kine), kube-proxy is replaced by Cilium.
+Those targets and their rule groups are disabled. Exposing them would need k3s flags, which belong
+to the node setup, not to this repository. Cilium/Hubble metrics are not scraped either (Cilium is
+not managed by Argo CD). node-exporter runs without `hostNetwork` (host firewalls stay closed for
+port 9100), so its network counters are the pod's, not the node's; CPU, memory and filesystems are
+the node's (`hostPID`, host `/`, `/proc`, `/sys` read-only).
+
+**Admission webhooks are off.** Their certificates come from Helm hook jobs that do not work under
+Argo CD. Owners of `PrometheusRule` objects validate them in CI (`promtool check rules`).
+
+**Lab rules** (Argo CD, monitoring itself, later SD cards, certificates, secrets) live in one place:
+`additionalPrometheusRulesMap.homelab` in `platform/kube-prometheus-stack/values.yaml`. Argo CD only
+exposes plain metrics Services; their ServiceMonitor is `prometheus.additionalServiceMonitors` there,
+so Argo CD never depends on the monitoring CRDs. `Watchdog` always fires — that is the heartbeat.
+
+### Access
+
+No ingress. Over the private network:
+
+```sh
+kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80          # http://localhost:3000
+kubectl port-forward svc/kube-prometheus-stack-prometheus -n monitoring 9090:9090     # http://localhost:9090
+kubectl port-forward svc/kube-prometheus-stack-alertmanager -n monitoring 9093:9093   # http://localhost:9093
+```
+
+Grafana login comes from the `grafana-admin` Secret (keys `admin-user`, `admin-password`), created
+by hand before the first sync (see Bootstrap) with a random password kept in a password manager.
+The chart's default password is never used. No anonymous access.
+
+### Contracts
+
+- **Firing alerts** (for health checks): Alertmanager API through the port-forward above,
+  `GET http://localhost:9093/api/v2/alerts`. **No `Watchdog` in the answer means monitoring is
+  broken**, not "no alerts": if Prometheus is down, Alertmanager resolves everything within minutes.
+- **Applications with ServiceMonitor/PodMonitor/PrometheusRule:** picked up in any namespace without
+  any labels (all `*Selector`/`*NamespaceSelector` are `{}`).
+- **History:** rule windows must not exceed the retention (3d), and after a Prometheus restart long
+  windows are unreliable until they refill. 28–30 day SLO periods and error budgets need remote write.
+- **NetworkPolicy of an application:** Prometheus lives in namespace `monitoring`; allow ingress from
+  ```yaml
+  - namespaceSelector:
+      matchLabels: { kubernetes.io/metadata.name: monitoring }
+    podSelector:
+      matchLabels: { app.kubernetes.io/name: prometheus }
+  ```
+  A bare `podSelector` without `namespaceSelector` matches only the application's own namespace.
+
+### Upgrades
+
+Read the chart's [UPGRADE.md](https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/UPGRADE.md)
+before every version bump: a major version usually means new CRDs. They are applied with the chart
+(`ServerSideApply` — the CRDs exceed the client-side apply annotation limit).
+
+### Rollback and reinstall
+
+```sh
+git rm apps/kube-prometheus-stack.yaml && git commit && git push   # no finalizer: resources stay
+helm dependency build platform/kube-prometheus-stack
+helm template kube-prometheus-stack platform/kube-prometheus-stack -n monitoring | kubectl delete --ignore-not-found -f -
+kubectl delete namespace monitoring                                 # also deletes grafana-admin
+kubectl get crd -o name | grep monitoring.coreos.com | xargs kubectl delete
+```
+
+Deleting the CRDs also deletes every `PrometheusRule`/`ServiceMonitor` of other applications.
+Reinstall: recreate `grafana-admin` with the password from the password manager (Bootstrap), restore
+the file, push.
 
 ## Rollback (remove Argo CD)
 
