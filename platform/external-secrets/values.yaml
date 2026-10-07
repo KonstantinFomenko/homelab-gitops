@@ -1,0 +1,32 @@
+external-secrets:
+  # Only namespaced SecretStores: each application reads Vault with its own role, so one namespace
+  # can never read another's secrets. No cluster-wide stores, no push back into Vault.
+  crds:
+    createClusterSecretStore: false
+    createClusterExternalSecret: false
+    createClusterPushSecret: false
+    createPushSecret: false
+  processClusterStore: false
+  processClusterExternalSecret: false
+  processClusterPushSecret: false
+  processPushSecret: false
+
+  nodeSelector:
+    node-role: app
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 192Mi }
+
+  webhook:
+    nodeSelector:
+      node-role: app
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 96Mi }
+
+  certController:
+    nodeSelector:
+      node-role: app
+    resources:
+      requests: { cpu: 10m, memory: 48Mi }
+      limits: { memory: 128Mi }
