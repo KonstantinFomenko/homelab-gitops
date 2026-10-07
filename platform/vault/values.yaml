@@ -25,6 +25,11 @@ vault:
           ui = false
           disable_mlock = true
 
+          # Vault 2.0 requires a token for sys/generate-root (CVE-2026-5807). The root token is
+          # revoked after setup, so without this a new one could never be generated from the
+          # unseal keys. Risk: someone inside the cluster can start/cancel the ceremony, not finish it.
+          enable_unauthenticated_access = ["generate-root"]
+
           listener "tcp" {
             address         = "[::]:8200"
             cluster_address = "[::]:8201"
