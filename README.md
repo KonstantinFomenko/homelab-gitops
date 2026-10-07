@@ -29,6 +29,9 @@ cluster: Argo CD is the only owner of its objects; `helm install/upgrade` are ne
 | `root` | `apps/` | automated, `selfHeal`, `prune` |
 | `argocd` | `platform/argocd` | automated, `selfHeal`, no prune; no finalizer, `Prune=false` |
 | `kube-prometheus-stack` | `platform/kube-prometheus-stack` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
+| `cert-manager` | `platform/cert-manager` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
+| `vault` | `platform/vault` | automated, `selfHeal`, `prune`; no finalizer (data) |
+| `external-secrets` | `platform/external-secrets` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
 
 ## Bootstrap from scratch (= disaster recovery)
 
@@ -92,6 +95,29 @@ manager, and the secret is deleted (as the Argo CD docs recommend).
 resources) only on components **without CRDs and without data**. Components with CRDs or data
 (e.g. Vault, External Secrets Operator) get no finalizer: deleting the file leaves the resources in
 the cluster, data is removed by hand. `argocd` itself never has one.
+
+## Secrets and certificates
+
+**cert-manager** runs the lab's internal CA: a self-signed root (`homelab-ca`, 10 years) behind the
+`ClusterIssuer` `homelab-ca`. No ACME — nothing is exposed to the internet. Consumers trust `ca.crt`
+of Secret `homelab-ca` in `cert-manager` (public). Losing the CA key means a new CA and a new
+`caBundle` for every consumer; no data is lost.
+
+**Vault** — one node, integrated storage (Raft) on the app node, TLS only (certificate `vault-tls`
+from `homelab-ca`, 1 year). No HA on purpose: the only consumer is External Secrets Operator, and the
+Kubernetes Secrets it writes survive Vault being sealed or down. Unseal is manual (Shamir, 3 keys,
+threshold 2, kept in a password manager) — a sealed Vault does not stop running workloads. Raft data
+sits on the SD card (`local-path`) **without backup**: the reference copy of every value is the
+password manager, so losing Vault means re-initialising it and re-entering the values.
+- The root token is revoked after setup; `generate-root` from the unseal keys is enabled without a
+  token (`enable_unauthenticated_access`, Vault 2.0 requires one by default — CVE-2026-5807).
+- The StatefulSet uses `OnDelete`: a config change takes effect after deleting the pod, then unseal.
+- cert-manager renews `vault-tls` 30 days ahead; Vault reads it on `kubectl exec -n vault vault-0 --
+  kill -HUP 1` (no restart, no unseal). `CertificateExpiresSoon` fires if that is forgotten.
+
+**External Secrets Operator** — namespaced `SecretStore`s only (cluster-wide stores and push secrets
+are disabled): every namespace logs in to Vault with its own Kubernetes-auth role and reads only its
+own path. Secrets in the k3s datastore are encrypted at rest (`secrets-encryption` on the server).
 
 ## Monitoring
 
