@@ -1,0 +1,32 @@
+# Vault's listener certificate from the lab's internal CA (platform/cert-manager).
+# cert-manager renews it 30 days ahead, but Vault reads the new file only on SIGHUP:
+#   kubectl exec -n vault vault-0 -- kill -HUP 1        (no restart, no unseal)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-tls
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  secretName: vault-tls
+  duration: 8760h       # 1 year
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - vault
+    - vault.{{ .Release.Namespace }}.svc
+    - vault-active
+    - vault-active.{{ .Release.Namespace }}.svc
+    - vault-internal
+    - "*.vault-internal"
+    - "*.vault-internal.{{ .Release.Namespace }}.svc"
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: homelab-ca

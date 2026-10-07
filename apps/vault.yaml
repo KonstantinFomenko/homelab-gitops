@@ -1,0 +1,22 @@
+# Vault. Component with data: deliberately NO resources-finalizer — deleting this file leaves the
+# StatefulSet's PVC (Raft data) in place.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vault
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KonstantinFomenko/homelab-gitops.git
+    targetRevision: main
+    path: platform/vault
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

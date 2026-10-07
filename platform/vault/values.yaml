@@ -1,0 +1,72 @@
+vault:
+  global:
+    # TLS everywhere: VAULT_ADDR in the pod is https://127.0.0.1:8200, probes use https.
+    tlsDisable: false
+
+  # Secrets reach pods only through External Secrets Operator: no injector, no CSI provider.
+  injector:
+    enabled: false
+  csi:
+    enabled: false
+  ui:
+    enabled: false
+
+  server:
+    # One node, integrated storage (Raft). No HA: the only consumer is External Secrets Operator,
+    # and the Kubernetes Secrets it writes survive Vault being sealed or down. Unseal is manual
+    # (Shamir keys in a password manager), so every extra replica would be one more manual unseal.
+    ha:
+      enabled: true
+      replicas: 1
+      raft:
+        enabled: true
+        setNodeId: true
+        config: |
+          ui = false
+          disable_mlock = true
+
+          listener "tcp" {
+            address         = "[::]:8200"
+            cluster_address = "[::]:8201"
+            tls_cert_file   = "/vault/userconfig/vault-tls/tls.crt"
+            tls_key_file    = "/vault/userconfig/vault-tls/tls.key"
+            tls_min_version = "tls12"
+          }
+
+          storage "raft" {
+            path = "/vault/data"
+          }
+
+          service_registration "kubernetes" {}
+
+    # Certificate from templates/certificate.yaml.
+    volumes:
+      - name: vault-tls
+        secret:
+          secretName: vault-tls
+    volumeMounts:
+      - name: vault-tls
+        mountPath: /vault/userconfig/vault-tls
+        readOnly: true
+    extraEnvironmentVars:
+      VAULT_CACERT: /vault/userconfig/vault-tls/ca.crt
+
+    nodeSelector:
+      node-role: app
+
+    # Raft data on the SD card of the app node (local-path), no backup: a deliberate exception to
+    # "SD cards are not written" until object storage exists. Losing the card means re-initialising
+    # Vault and re-entering secrets from the password manager.
+    dataStorage:
+      enabled: true
+      size: 1Gi
+      storageClass: local-path
+    auditStorage:
+      enabled: false
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
