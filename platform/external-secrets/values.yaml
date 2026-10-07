@@ -13,20 +13,21 @@ external-secrets:
 
   nodeSelector:
     node-role: app
+  # Measured 2026-10-07 at rest (requests ≈ rest, limits ≈ 2×): controller 74Mi, webhook 73Mi, cert-controller 72Mi.
   resources:
-    requests: { cpu: 10m, memory: 64Mi }
+    requests: { cpu: 10m, memory: 80Mi }
     limits: { memory: 192Mi }
 
   webhook:
     nodeSelector:
       node-role: app
     resources:
-      requests: { cpu: 10m, memory: 32Mi }
-      limits: { memory: 96Mi }
+      requests: { cpu: 10m, memory: 80Mi }
+      limits: { memory: 160Mi }
 
   certController:
     nodeSelector:
       node-role: app
     resources:
-      requests: { cpu: 10m, memory: 48Mi }
-      limits: { memory: 128Mi }
+      requests: { cpu: 10m, memory: 80Mi }
+      limits: { memory: 160Mi }

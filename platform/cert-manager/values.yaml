@@ -7,23 +7,24 @@ cert-manager:
   # Everything on the app node, next to its main consumer (Vault).
   nodeSelector:
     node-role: app
+  # Measured 2026-10-07 at rest (requests ≈ rest, limits ≈ 2×): controller 88Mi, cainjector 70Mi, webhook 60Mi.
   resources:
-    requests: { cpu: 10m, memory: 48Mi }
-    limits: { memory: 128Mi }
+    requests: { cpu: 10m, memory: 96Mi }
+    limits: { memory: 192Mi }
 
   webhook:
     nodeSelector:
       node-role: app
     resources:
-      requests: { cpu: 10m, memory: 24Mi }
-      limits: { memory: 64Mi }
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 128Mi }
 
   cainjector:
     nodeSelector:
       node-role: app
     resources:
-      requests: { cpu: 10m, memory: 48Mi }
-      limits: { memory: 128Mi }
+      requests: { cpu: 10m, memory: 72Mi }
+      limits: { memory: 160Mi }
 
   # A Helm hook Job: under Argo CD it only adds noise to every sync.
   startupapicheck:
