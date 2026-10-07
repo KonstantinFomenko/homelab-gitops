@@ -1,0 +1,9 @@
+apiVersion: v2
+name: cert-manager
+description: cert-manager for the home lab — umbrella chart around the official chart, plus the lab's internal CA
+type: application
+version: 0.1.0
+dependencies:
+  - name: cert-manager
+    version: v1.21.2
+    repository: https://charts.jetstack.io

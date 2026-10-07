@@ -59,6 +59,27 @@ kube-prometheus-stack:
               annotations:
                 summary: No metrics from the Argo CD application controller
                 description: The controller is down or not scraped; Application statuses are stale.
+        - name: cert-manager
+          rules:
+            - alert: CertificateExpiresSoon
+              # cert-manager renews 30 days ahead, so this fires only if renewal is stuck.
+              # Vault's certificate is the exception: cert-manager renews it, but Vault reads the new
+              # file only on SIGHUP (`kubectl exec -n vault vault-0 -- kill -HUP 1`, no unseal needed).
+              expr: certmanager_certificate_expiration_timestamp_seconds - time() < 30 * 86400
+              for: 1h
+              labels:
+                severity: warning
+              annotations:
+                summary: Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in less than 30 days
+                description: Renewal is stuck. Check with `kubectl describe certificate {{ $labels.name }} -n {{ $labels.namespace }}`.
+            - alert: CertificateNotReady
+              expr: certmanager_certificate_ready_status{condition="False"} == 1
+              for: 30m
+              labels:
+                severity: warning
+              annotations:
+                summary: Certificate {{ $labels.namespace }}/{{ $labels.name }} is not Ready
+                description: Check with `kubectl describe certificate {{ $labels.name }} -n {{ $labels.namespace }}`.
         - name: monitoring
           rules:
             - alert: MonitoringContainerOOMKilled
@@ -106,6 +127,16 @@ kube-prometheus-stack:
               values: [argocd-metrics, argocd-repo-server-metrics, argocd-server-metrics]
         namespaceSelector:
           matchNames: [argocd]
+        endpoints:
+          - port: http-metrics
+      # cert-manager controller: certificate expiry and readiness (rules: group cert-manager).
+      - name: cert-manager
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: cert-manager
+            app.kubernetes.io/component: controller
+        namespaceSelector:
+          matchNames: [cert-manager]
         endpoints:
           - port: http-metrics
 

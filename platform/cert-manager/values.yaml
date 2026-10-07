@@ -1,0 +1,37 @@
+cert-manager:
+  crds:
+    enabled: true
+    keep: true            # the CRDs survive removing the chart (and with them every Certificate)
+
+  # Only the internal CA, no ACME: nothing is exposed to the internet.
+  # Everything on the app node, next to its main consumer (Vault).
+  nodeSelector:
+    node-role: app
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits: { memory: 128Mi }
+
+  webhook:
+    nodeSelector:
+      node-role: app
+    resources:
+      requests: { cpu: 10m, memory: 24Mi }
+      limits: { memory: 64Mi }
+
+  cainjector:
+    nodeSelector:
+      node-role: app
+    resources:
+      requests: { cpu: 10m, memory: 48Mi }
+      limits: { memory: 128Mi }
+
+  # A Helm hook Job: under Argo CD it only adds noise to every sync.
+  startupapicheck:
+    enabled: false
+
+  # Plain metrics Service only; the ServiceMonitor lives in kube-prometheus-stack's values
+  # (same as Argo CD), so cert-manager never depends on the monitoring CRDs.
+  prometheus:
+    enabled: true
+    servicemonitor:
+      enabled: false

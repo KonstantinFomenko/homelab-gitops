@@ -1,0 +1,47 @@
+# The lab's internal CA: self-signed root -> CA ClusterIssuer "homelab-ca".
+# Consumers trust the root certificate (ca.crt of Secret homelab-ca in cert-manager); it is public.
+# The CA key lives only in that Secret, without backup: losing it = a new CA and a new caBundle
+# for every consumer, no data is lost.
+# Wave 1 and SkipDryRunOnMissingResource: the CRDs and the webhook come first in the same sync.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: homelab-ca
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  isCA: true
+  commonName: homelab-ca
+  secretName: homelab-ca
+  duration: 87600h      # 10 years
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: homelab-ca
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  ca:
+    secretName: homelab-ca

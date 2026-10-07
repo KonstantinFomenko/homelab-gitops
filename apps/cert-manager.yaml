@@ -1,0 +1,27 @@
+# cert-manager and the lab's internal CA. Component with CRDs: deliberately NO resources-finalizer —
+# deleting this file leaves the CRDs, the CA and every Certificate in place.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/KonstantinFomenko/homelab-gitops.git
+    targetRevision: main
+    path: platform/cert-manager
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    # The issuers wait for the webhook to become ready.
+    retry:
+      limit: 10
+      backoff: { duration: 30s, factor: 2, maxDuration: 5m }
