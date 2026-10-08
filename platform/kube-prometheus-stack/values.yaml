@@ -76,6 +76,10 @@ kube-prometheus-stack:
       kubeProxy: false
       kubeSchedulerAlerting: false
       kubeSchedulerRecording: false
+      # Holds only KubeAPIErrorBudgetBurn (disabled below). Disabling the alert alone renders the
+      # group with `rules: null`, which the PrometheusRule CRD rejects — and Argo CD's dry run then
+      # fails the whole sync. The burn-rate recording rules (dashboard) are a separate group, kept.
+      kubeApiserverSlos: false
     # Single alerts that fire on a healthy cluster or cannot fire here at all. Each one: why, and
     # what still covers the risk. Disabling by name removes every severity variant of the alert.
     disabled:
