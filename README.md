@@ -195,7 +195,7 @@ cluster only `Watchdog` (and `InfoInhibitor`) fire; anything else is a real sign
 | `CPUThrottlingHigh` | small containers with CPU limits on a Pi are throttled in idle bursts; starvation still shows as `KubePodCrashLooping`/`KubePodNotReady` |
 | `Watchdog` | replaced by the lab's data-dependent `Watchdog` (group `monitoring`) |
 | `AlertmanagerMembersInconsistent`, `AlertmanagerConfigInconsistent`, `AlertmanagerClusterDown` | one Alertmanager: no cluster; its death is the dead-man's switch's job (Alert delivery) |
-| `KubeAPIErrorBudgetBurn` | no API SLO in the lab; the budget burns on every cold start (kine on SD); an outage is `KubeAPIDown` |
+| `KubeAPIErrorBudgetBurn` (with its group `kubeApiserverSlos`: an empty group fails the sync) | no API SLO in the lab; the budget burns on every cold start (kine on SD); an outage is `KubeAPIDown` |
 | `KubeStateMetricsSharding*`/`ShardsMissing`, `Kubelet*CertificateExpiration`, `NodeRAIDDegraded`, `NodeFileDescriptorLimit`, `PrometheusRemote*` | cannot fire here: no sharding, k3s has no kubelet certificate metrics, no RAID, unlimited fds, no remote write |
 
 **Severity is curated.** `critical` wakes at night, so only the chart rules where waiting until
