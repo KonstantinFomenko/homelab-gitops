@@ -8,6 +8,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "-1"
+    # From scratch cert-manager CRDs may not exist yet; the Application retries.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   secretName: vault-tls
   duration: 8760h       # 1 year
