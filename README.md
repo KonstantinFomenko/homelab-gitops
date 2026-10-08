@@ -35,6 +35,9 @@ cluster: Argo CD is the only owner of its objects; `helm install/upgrade` are ne
 
 ## Bootstrap from scratch (= disaster recovery)
 
+Nodes first: a new or reinstalled node gets the settings from [`docs/cluster/nodes.md`](docs/cluster/nodes.md)
+before it joins the cluster.
+
 Needs `kubectl` with cluster-admin and `helm` (used only as a renderer).
 
 ```sh
