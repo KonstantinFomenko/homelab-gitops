@@ -49,6 +49,25 @@ kube-prometheus-stack:
           sourceLabels: [__name__]
           regex: kubelet_.*|process_.*|go_.*|volume_.*|storage_operation_.*|prober_.*|rest_client_requests_total|rest_client_request_duration_seconds_bucket
 
+  # Severity is the routing contract (README, Contracts): `critical` wakes at night and means
+  # "today", `warning` means "by Saturday". The chart's critical rules kept as critical: the four
+  # NodeFilesystem* (a full /run stops the node), KubeletDown, KubeAPIDown,
+  # KubeClientCertificateExpiration (< 24 h, then the cluster stops), KubePersistentVolume*FillingUp
+  # (the only PV is Vault's data). The rest is either disabled below or lowered here: nothing is lost
+  # by waiting until morning, and a full stop of Prometheus or Alertmanager is the dead-man's switch's job.
+  # An override applies to every rule with that name (all its severity variants).
+  customRules:
+    AlertmanagerFailedReload: { severity: warning }         # the previous config keeps working
+    AlertmanagerClusterFailedToSendAlerts: { severity: warning } # Telegram failures: external check, see route
+    AlertmanagerClusterCrashlooping: { severity: warning }  # also KubePodCrashLooping
+    KubeStateMetricsListErrors: { severity: warning }       # slow apiserver on cold start; stale metrics only
+    KubeStateMetricsWatchErrors: { severity: warning }
+    KubePersistentVolumeErrors: { severity: warning }       # the pod using the volume shows it too
+    PrometheusBadConfig: { severity: warning }              # the previous config keeps working
+    PrometheusRuleFailures: { severity: warning }
+    PrometheusTargetSyncFailure: { severity: warning }
+    PrometheusErrorSendingAlertsToAnyAlertmanager: { severity: warning } # all errors = no Watchdog = external check
+
   defaultRules:
     rules:
       # Rule groups for the targets disabled above — they would only produce "target down" noise.
@@ -57,8 +76,28 @@ kube-prometheus-stack:
       kubeProxy: false
       kubeSchedulerAlerting: false
       kubeSchedulerRecording: false
-    # Single alerts that fire on a healthy cluster. Each one: why, and what still covers the risk.
+    # Single alerts that fire on a healthy cluster or cannot fire here at all. Each one: why, and
+    # what still covers the risk. Disabling by name removes every severity variant of the alert.
     disabled:
+      # One Alertmanager replica: no cluster to be inconsistent, and a dead Alertmanager cannot
+      # report its own death — the external dead-man's switch on Watchdog does (README, Alert delivery).
+      AlertmanagerMembersInconsistent: true
+      AlertmanagerConfigInconsistent: true
+      AlertmanagerClusterDown: true
+      # The lab has no API availability SLO; the 99% budget burns on every cold start (kine on SD).
+      # A real outage is KubeAPIDown.
+      KubeAPIErrorBudgetBurn: true
+      # Cannot fire here: kube-state-metrics is not sharded (no shard metrics), k3s does not expose
+      # kubelet_certificate_manager_* (k3s certificates: KubeClientCertificateExpiration), no md RAID,
+      # node_filefd_maximum is unlimited, no remote write.
+      KubeStateMetricsShardingMismatch: true
+      KubeStateMetricsShardsMissing: true
+      KubeletClientCertificateExpiration: true
+      KubeletServerCertificateExpiration: true
+      NodeRAIDDegraded: true
+      NodeFileDescriptorLimit: true
+      PrometheusRemoteStorageFailures: true
+      PrometheusRemoteWriteBehind: true
       # Small containers with CPU limits on a Pi (sidecars, config-reloader, node-exporter) spend
       # 25–95% of CFS periods throttled in short bursts while idle. Info severity, no action to take;
       # real starvation shows up as failing probes and restarts (KubePodCrashLooping, KubePodNotReady).
@@ -114,6 +153,19 @@ kube-prometheus-stack:
               annotations:
                 summary: Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} is not Ready
                 description: Check with `kubectl describe certificate {{ $labels.name }} -n {{ $labels.exported_namespace }}`.
+        - name: vault
+          rules:
+            - alert: VaultNotReady
+              # Vault has no metrics yet; its readiness probe fails while it is sealed, so this
+              # catches "sealed" as well as "down". Sealed after a power loss is normal until
+              # auto-unseal, hence warning. Runbook: README, Contracts.
+              expr: kube_pod_status_ready{namespace="vault",condition="true"} == 0
+              for: 15m
+              labels:
+                severity: warning
+              annotations:
+                summary: Vault pod {{ $labels.pod }} is not Ready
+                description: Sealed or down for 15 minutes; External Secrets cannot refresh secrets. Check with `kubectl exec -n vault {{ $labels.pod }} -- vault status`.
         - name: monitoring
           rules:
             - alert: Watchdog
@@ -147,8 +199,13 @@ kube-prometheus-stack:
                 description: Check `prometheus_tsdb_compactions_failed_total` and the WAL size. Runbook in README (Monitoring, TSDB full).
             - alert: MonitoringContainerOOMKilled
               # After an OOM the in-memory TSDB is empty, so restart-based alerts never fire.
-              # kube-state-metrics reports the last termination reason, which survives the restart.
-              expr: kube_pod_container_status_last_terminated_reason{namespace="monitoring",reason="OOMKilled"} == 1
+              # kube-state-metrics reports the last termination reason, which survives the restart —
+              # until the next one, so it is limited to terminations within the last hour (the reason
+              # alone kept firing, and was re-sent every 12 h). The timestamp survives the TSDB loss too.
+              expr: |
+                kube_pod_container_status_last_terminated_reason{namespace="monitoring",reason="OOMKilled"} == 1
+                and on (namespace, pod, container)
+                (time() - kube_pod_container_status_last_terminated_timestamp{namespace="monitoring"}) < 3600
               labels:
                 severity: warning
               annotations:
@@ -243,10 +300,104 @@ kube-prometheus-stack:
         limits: { cpu: "1", memory: 3072Mi }
 
   # --- Alertmanager ----------------------------------------------------------------------------
-  # Receiver is the chart default `null`: alerts are visible in the UI and API (/api/v2/alerts).
-  # Delivery outside the cluster comes later with a secret from Vault.
+  # Delivery: Telegram (a private channel of the lab's own bot) and an external dead-man's switch
+  # (healthchecks.io). Routes live here, in git; only the credentials come from the hand-made Secret
+  # `alertmanager-telegram` (README, Bootstrap), mounted at /etc/alertmanager/secrets/<name>/<key>.
+  # Moves to Vault + External Secrets once Vault unseals itself (SPEC-036): the channel for outages
+  # must not depend on a component that stays sealed after every power loss.
+  # Routes match on severity only — an application that needs its own route ships an
+  # AlertmanagerConfig in its namespace.
   alertmanager:
+    # Replaces the chart's config: inhibit_rules and the `null` receiver are copied from 91.9.0.
+    config:
+      global:
+        resolve_timeout: 5m
+      inhibit_rules:
+        - source_matchers: ['severity = critical']
+          target_matchers: ['severity =~ warning|info']
+          equal: ['namespace', 'alertname']
+        - source_matchers: ['severity = warning']
+          target_matchers: ['severity = info']
+          equal: ['namespace', 'alertname']
+        - source_matchers: ['alertname = InfoInhibitor']
+          target_matchers: ['severity = info']
+          equal: ['namespace']
+        - target_matchers: ['alertname = InfoInhibitor']
+      # Asia/Tbilisi is where the lab's owner sleeps; change on relocation.
+      time_intervals:
+        - name: night
+          time_intervals:
+            - times:
+                - { start_time: "23:00", end_time: "24:00" }
+                - { start_time: "00:00", end_time: "08:00" }
+              location: Asia/Tbilisi
+      route:
+        group_by: ['namespace']
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 12h
+        receiver: 'null'
+        routes:
+          # Heartbeat to the external check "cluster alive": no ping for 30 min = power loss,
+          # rpi-03 down, Prometheus or Alertmanager stopped, or Prometheus not writing (Watchdog
+          # depends on fresh data).
+          - receiver: healthchecks-watchdog
+            matchers: ['alertname = "Watchdog"']
+            group_by: ['alertname']
+            group_wait: 0s
+            group_interval: 1m
+            repeat_interval: 5m
+          # Telegram itself failing: signal the external check "delivery broken", which notifies
+          # through its own channels. Continues to Telegram below for transient failures.
+          - receiver: healthchecks-delivery-failed
+            matchers:
+              - 'alertname =~ "AlertmanagerFailedToSendAlerts|AlertmanagerClusterFailedToSendAlerts"'
+              - 'integration = "telegram"'
+            group_by: ['alertname']
+            group_wait: 0s
+            repeat_interval: 1h
+            continue: true
+          - receiver: 'null'
+            matchers: ['severity = "info"']
+          - receiver: 'null'
+            matchers: ['alertname = "InfoInhibitor"']
+          # Not critical: at night without sound, by day with sound. An active route outside its
+          # interval still matches and stays silent, hence the pair with `continue`. An alert that
+          # spans 23:00 or 08:00 arrives in both — the morning one is the summary of the night.
+          - receiver: telegram-silent
+            matchers: ['severity != "critical"']
+            active_time_intervals: [night]
+            continue: true
+          - receiver: telegram
+            matchers: ['severity != "critical"']
+            mute_time_intervals: [night]
+          # Critical: with sound at any time. The list of critical rules is curated (customRules).
+          - receiver: telegram
+      receivers:
+        - name: 'null'
+        - name: telegram
+          telegram_configs:
+            - bot_token_file: /etc/alertmanager/secrets/alertmanager-telegram/bot-token
+              chat_id_file: /etc/alertmanager/secrets/alertmanager-telegram/chat-id
+              send_resolved: true
+        - name: telegram-silent
+          telegram_configs:
+            - bot_token_file: /etc/alertmanager/secrets/alertmanager-telegram/bot-token
+              chat_id_file: /etc/alertmanager/secrets/alertmanager-telegram/chat-id
+              send_resolved: true
+              disable_notifications: true
+        - name: healthchecks-watchdog
+          webhook_configs:
+            - url_file: /etc/alertmanager/secrets/alertmanager-telegram/watchdog-url
+              send_resolved: false
+        - name: healthchecks-delivery-failed
+          webhook_configs:
+            - url_file: /etc/alertmanager/secrets/alertmanager-telegram/failed-url # the check's /fail URL
+              send_resolved: false
+      templates:
+        - '/etc/alertmanager/config/*.tmpl'
     alertmanagerSpec:
+      secrets: [alertmanager-telegram]
       replicas: 1
       nodeSelector:
         node-role: data

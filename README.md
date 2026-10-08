@@ -45,9 +45,13 @@ kubectl create namespace argocd
 helm dependency build platform/argocd
 helm template argocd platform/argocd -n argocd | kubectl apply --server-side --force-conflicts -f -
 kubectl -n argocd rollout status deploy --timeout=5m
-kubectl create namespace monitoring       # Grafana admin Secret must exist before its first sync
+kubectl create namespace monitoring       # both Secrets must exist before the first sync
 kubectl create secret generic grafana-admin -n monitoring \
   --from-literal=admin-user=admin --from-literal=admin-password='<from the password manager>'
+kubectl create secret generic alertmanager-telegram -n monitoring \
+  --from-literal=bot-token='<from the password manager>' --from-literal=chat-id='<from the password manager>' \
+  --from-literal=watchdog-url='<ping URL of check "cluster alive">' \
+  --from-literal=failed-url='<ping URL of check "delivery broken">/fail'
 kubectl apply -f bootstrap/root.yaml      # the only manual apply, once
 ```
 
@@ -190,6 +194,15 @@ cluster only `Watchdog` (and `InfoInhibitor`) fire; anything else is a real sign
 | groups `etcd`, `kubeControllerManager`, `kubeProxy`, `kubeSchedulerAlerting`, `kubeSchedulerRecording` | their targets do not exist on k3s (see above) |
 | `CPUThrottlingHigh` | small containers with CPU limits on a Pi are throttled in idle bursts; starvation still shows as `KubePodCrashLooping`/`KubePodNotReady` |
 | `Watchdog` | replaced by the lab's data-dependent `Watchdog` (group `monitoring`) |
+| `AlertmanagerMembersInconsistent`, `AlertmanagerConfigInconsistent`, `AlertmanagerClusterDown` | one Alertmanager: no cluster; its death is the dead-man's switch's job (Alert delivery) |
+| `KubeAPIErrorBudgetBurn` | no API SLO in the lab; the budget burns on every cold start (kine on SD); an outage is `KubeAPIDown` |
+| `KubeStateMetricsSharding*`/`ShardsMissing`, `Kubelet*CertificateExpiration`, `NodeRAIDDegraded`, `NodeFileDescriptorLimit`, `PrometheusRemote*` | cannot fire here: no sharding, k3s has no kubelet certificate metrics, no RAID, unlimited fds, no remote write |
+
+**Severity is curated.** `critical` wakes at night, so only the chart rules where waiting until
+morning costs data or the whole lab stay critical: the four `NodeFilesystem*`, `KubeletDown`,
+`KubeAPIDown`, `KubeClientCertificateExpiration`, `KubePersistentVolume*FillingUp` (Vault's data).
+The chart's other critical rules are disabled above or lowered to `warning` in `customRules`
+(an override applies to every rule with that name). A new critical rule has to pass the same test.
 
 **TSDB full (runbook).** Signs: `compaction failed` / `no space left on device` in the Prometheus
 log, `prometheus_tsdb_head_max_time` stands still, `PrometheusTSDBNearlyFull` or no `Watchdog`.
@@ -210,7 +223,39 @@ Grafana login comes from the `grafana-admin` Secret (keys `admin-user`, `admin-p
 by hand before the first sync (see Bootstrap) with a random password kept in a password manager.
 The chart's default password is never used. No anonymous access.
 
+### Alert delivery
+
+- **Telegram:** a private channel; the lab's own bot is its only poster. All alerts except `info`.
+  `critical` — with sound at any time; everything else — with sound by day and **without sound
+  23:00–08:00 `Asia/Tbilisi`** (`disable_notifications`, nothing is dropped; an alert spanning 23:00
+  or 08:00 comes twice). Grouped by namespace, repeated every 12 h, resolved notifications on.
+- **Dead-man's switch (healthchecks.io):** `Watchdog` pings check "cluster alive" every 5 minutes.
+  No ping for 30 minutes — power loss, rpi-03 down, Prometheus or Alertmanager stopped, Prometheus
+  not writing — and the service notifies through **its own** Telegram integration and e-mail, not
+  through the lab's bot. Check "delivery broken" gets a `/fail` signal on
+  `Alertmanager(Cluster)FailedToSendAlerts{integration="telegram"}`.
+- Credentials: Secret `alertmanager-telegram` (bot token, `chat_id`, two ping URLs), created by hand
+  (Bootstrap), reference copy in the password manager. Routes are in `values.yaml`.
+- **Telegram is notifications, not a log.** After a power loss (marker: "back up" from
+  healthchecks) earlier firing messages without a resolved one are unreliable — the truth is
+  `/api/v2/alerts`.
+- **Planned work longer than 30 minutes** (node maintenance, cluster upgrade): pause check
+  "cluster alive" in healthchecks first, resume after.
+- **Leaked bot token:** revoke it in BotFather → new token to the password manager → edit
+  `bot-token` in the Secret → `kubectl delete pod -n monitoring alertmanager-kube-prometheus-stack-alertmanager-0`
+  → check that a test alert arrives. **Leaked ping URL:** new URL in healthchecks → Secret → delete
+  the pod. The Secret is read through files, so a changed value needs the pod restart.
+
 ### Contracts
+
+- **Severity → when I react:** `critical` — the same day (it may wake me); `warning` — by Saturday's
+  review; `info` — not delivered. Routes match on severity only: an application that needs its own
+  receiver ships an `AlertmanagerConfig` in its namespace.
+- **Vault not Ready** (`VaultNotReady`, `warning`, 15 min): sealed or down — External Secrets cannot
+  refresh secrets, running workloads are unaffected. Sealed after a power loss is expected until
+  auto-unseal: unseal it (Secrets and certificates). Not Ready while unsealed: `kubectl describe pod`.
+- **Egress of Alertmanager:** 443 to `api.telegram.org` and `hc-ping.com` — needed by a future
+  default-deny policy in `monitoring`.
 
 - **Firing alerts** (for health checks): Alertmanager API through the port-forward above,
   `GET http://localhost:9093/api/v2/alerts`. **No `Watchdog` in the answer means monitoring is
@@ -242,12 +287,12 @@ before every version bump: a major version usually means new CRDs. They are appl
 git rm apps/kube-prometheus-stack.yaml && git commit && git push   # no finalizer: resources stay
 helm dependency build platform/kube-prometheus-stack
 helm template kube-prometheus-stack platform/kube-prometheus-stack -n monitoring | kubectl delete --ignore-not-found -f -
-kubectl delete namespace monitoring                                 # also deletes grafana-admin
+kubectl delete namespace monitoring                                 # also deletes grafana-admin, alertmanager-telegram
 kubectl get crd -o name | grep monitoring.coreos.com | xargs kubectl delete
 ```
 
 Deleting the CRDs also deletes every `PrometheusRule`/`ServiceMonitor` of other applications.
-Reinstall: recreate `grafana-admin` with the password from the password manager (Bootstrap), restore
+Reinstall: recreate `grafana-admin` and `alertmanager-telegram` from the password manager (Bootstrap), restore
 the file, push.
 
 ## Rollback (remove Argo CD)
