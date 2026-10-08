@@ -1,6 +1,6 @@
 # Vault's listener certificate from the lab's internal CA (platform/cert-manager).
 # cert-manager renews it 30 days ahead, but Vault reads the new file only on SIGHUP:
-#   kubectl exec -n vault vault-0 -- kill -HUP 1        (no restart, no unseal)
+#   kubectl exec -n vault vault-0 -- sh -c 'kill -HUP $(pidof vault)'        (no restart, no unseal)
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

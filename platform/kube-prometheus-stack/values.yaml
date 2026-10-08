@@ -64,7 +64,7 @@ kube-prometheus-stack:
             - alert: CertificateExpiresSoon
               # cert-manager renews 30 days ahead, so this fires only if renewal is stuck.
               # Vault's certificate is the exception: cert-manager renews it, but Vault reads the new
-              # file only on SIGHUP (`kubectl exec -n vault vault-0 -- kill -HUP 1`, no unseal needed).
+              # file only on SIGHUP (`kubectl exec -n vault vault-0 -- sh -c 'kill -HUP $(pidof vault)'`, no unseal needed).
               # The certificate's namespace is exported_namespace; namespace is cert-manager's own.
               expr: certmanager_certificate_expiration_timestamp_seconds - time() < 30 * 86400
               for: 1h

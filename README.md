@@ -113,7 +113,7 @@ password manager, so losing Vault means re-initialising it and re-entering the v
   token (`enable_unauthenticated_access`, Vault 2.0 requires one by default — CVE-2026-5807).
 - The StatefulSet uses `OnDelete`: a config change takes effect after deleting the pod, then unseal.
 - cert-manager renews `vault-tls` 30 days ahead; Vault reads it on `kubectl exec -n vault vault-0 --
-  kill -HUP 1` (no restart, no unseal) or on any restart of the pod. **No alert catches a forgotten
+  sh -c 'kill -HUP $(pidof vault)'` (no restart, no unseal) or on any restart of the pod. **No alert catches a forgotten
   SIGHUP:** `CertificateExpiresSoon` sees the renewed Secret, while Vault keeps serving the old
   certificate until it expires — then External Secrets can no longer sync (Application `Degraded`).
   Hence a calendar reminder for the renewal date (`kubectl get certificate vault-tls -n vault`,
