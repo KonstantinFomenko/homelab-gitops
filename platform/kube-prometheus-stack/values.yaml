@@ -509,8 +509,10 @@ kube-prometheus-stack:
     prometheus:
       monitor:
         relabelings:
+          # `action` is the API default, spelled out: without it Argo CD shows the object OutOfSync.
           - sourceLabels: [__meta_kubernetes_pod_node_name]
             targetLabel: node
+            action: replace
     resources:
       requests: { cpu: 10m, memory: 32Mi } # peak 5m / 26Mi
       limits: { cpu: 200m, memory: 64Mi }
