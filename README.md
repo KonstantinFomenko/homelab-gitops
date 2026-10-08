@@ -90,6 +90,9 @@ manager, and the secret is deleted (as the Argo CD docs recommend).
    `helm dependency build`, commit `Chart.lock`. Check: `helm template <name> platform/<name>`.
 2. `apps/<name>.yaml` — an `Application` pointing at `platform/<name>`.
 3. Push. `root` creates the Application; it syncs.
+4. The component has metrics or CRDs → note `prometheus_tsdb_head_series` before and after in the
+   PR description. Every CRD adds apiserver series (histograms are labelled by API group and
+   resource); the TSDB is sized for a budget of 75k (Monitoring).
 
 **Finalizer rule.** `resources-finalizer.argocd.argoproj.io` (delete the file → delete the
 resources) only on components **without CRDs and without data**. Components with CRDs or data
@@ -130,22 +133,37 @@ in namespace `monitoring`: Prometheus Operator, one Prometheus, one Alertmanager
 kube-state-metrics and node-exporter. Everything except node-exporter runs on the data node
 (`node-role=data`); node-exporter is a DaemonSet on all three nodes.
 
-**Nothing is written to SD cards.** No PVCs: Prometheus TSDB (`retention: 3d`, `retentionSize: 768MB`,
-tmpfs `sizeLimit: 1Gi`), Alertmanager state and Grafana's sqlite live in memory-backed `emptyDir`.
-tmpfs counts against the container memory limit, so Prometheus' limit = working memory + 1Gi.
+**Nothing is written to SD cards.** No PVCs: Prometheus TSDB (`retention: 3d`, `retentionSize: 1100MB`,
+tmpfs `sizeLimit: 1.5Gi`), Alertmanager state and Grafana's sqlite live in memory-backed `emptyDir`.
+tmpfs counts against the container memory limit, so Prometheus' limit = working memory + 1.5Gi.
 Metrics history, silences and Grafana sessions are lost on a pod restart or power loss — accepted
 until metrics are shipped to object storage. Hence: **no silences** — a noisy rule is disabled in
 `values.yaml` with a comment instead.
 
 **Resources** are set from measured peaks (a cold start of all nodes included): requests ≈ steady use,
 memory limits ≈ 1.5–2× the peak; the measurements are next to each value in `values.yaml`.
-Prometheus is the big one: ~0.5 GiB working memory plus the TSDB tmpfs (limit 2.5Gi), then Grafana
-(~455Mi with its sqlite tmpfs). 80–100k series (relabel apiserver histograms if it grows past that). Signal to rebalance: `node_memory_MemAvailable`
-below 1 GiB on the data node.
+Prometheus is the big one: ~0.5 GiB working memory plus the TSDB tmpfs (limit 3Gi), then Grafana
+(~455Mi with its sqlite tmpfs). Signal to rebalance: `node_memory_MemAvailable` below 1 GiB on the
+data node.
 
-**Not collected on k3s.** controller-manager and scheduler run inside the k3s process bound to
+**Series budget: 75k** (~45k after the cuts below; alert `PrometheusSeriesHigh`). TSDB space is
+sized for it: WAL peaks ~310MB, head chunks ~50MB, 3 days of blocks ~550–610MB, all counted by
+`retentionSize`. More series → shorter history or a full tmpfs (alert `PrometheusTSDBNearlyFull`).
+- The k3s server is one process with one metrics registry: the kubelet's `/metrics` on the server
+  node also returns all apiserver, etcd and scheduler metrics (~45k duplicate series). That endpoint
+  is cut to an **allowlist** of what the kubelet dashboard and chart rules read; an allowlist, so
+  the new metric families of a k3s upgrade do not slip in.
+- apiserver histograms that no chart rule or dashboard reads are dropped
+  (`apiserver_request_duration_seconds_bucket`, request/response sizes, watch histograms). The SLO
+  rules and the apiserver dashboard use `apiserver_request_sli_duration_seconds` — kept.
+- `--storage.tsdb.max-block-chunk-segment-size=64MB`: a compaction first preallocates a chunk
+  segment of that size. With the default 512MiB it failed once less than 512MiB of tmpfs was
+  free, never succeeded again, and the untruncated WAL filled the volume.
+
+**Not scraped as targets on k3s.** controller-manager and scheduler run inside the k3s process bound to
 `127.0.0.1`, there is no etcd (single server, sqlite/kine), kube-proxy is replaced by Cilium.
-Those targets and their rule groups are disabled. Exposing them would need k3s flags, which belong
+Those targets and their rule groups are disabled (their metrics still arrive through the k3s
+registry, see the series budget above). Exposing them would need k3s flags, which belong
 to the node setup, not to this repository. Cilium/Hubble metrics are not scraped either (Cilium is
 not managed by Argo CD). node-exporter runs without `hostNetwork` (host firewalls stay closed for
 port 9100), so its network counters are the pod's, not the node's; CPU, memory and filesystems are
@@ -157,7 +175,9 @@ Argo CD. Owners of `PrometheusRule` objects validate them in CI (`promtool check
 **Lab rules** (Argo CD, monitoring itself, later SD cards, certificates, secrets) live in one place:
 `additionalPrometheusRulesMap.homelab` in `platform/kube-prometheus-stack/values.yaml`. Argo CD only
 exposes plain metrics Services; their ServiceMonitor is `prometheus.additionalServiceMonitors` there,
-so Argo CD never depends on the monitoring CRDs. `Watchdog` always fires — that is the heartbeat.
+so Argo CD never depends on the monitoring CRDs. `Watchdog` is the heartbeat: the chart's
+`vector(1)` is replaced by a lab rule that fires only while fresh samples are written, so a
+Prometheus that runs but ingests nothing loses it within minutes.
 
 **Disabled default rules** (`defaultRules` in `values.yaml`, each with its reason there). On a healthy
 cluster only `Watchdog` (and `InfoInhibitor`) fire; anything else is a real signal.
@@ -166,6 +186,12 @@ cluster only `Watchdog` (and `InfoInhibitor`) fire; anything else is a real sign
 |---|---|
 | groups `etcd`, `kubeControllerManager`, `kubeProxy`, `kubeSchedulerAlerting`, `kubeSchedulerRecording` | their targets do not exist on k3s (see above) |
 | `CPUThrottlingHigh` | small containers with CPU limits on a Pi are throttled in idle bursts; starvation still shows as `KubePodCrashLooping`/`KubePodNotReady` |
+| `Watchdog` | replaced by the lab's data-dependent `Watchdog` (group `monitoring`) |
+
+**TSDB full (runbook).** Signs: `compaction failed` / `no space left on device` in the Prometheus
+log, `prometheus_tsdb_head_max_time` stands still, `PrometheusTSDBNearlyFull` or no `Watchdog`.
+Fix: `kubectl -n monitoring delete pod prometheus-kube-prometheus-stack-prometheus-0` — the
+history is lost (tmpfs). Then find out why compaction failed before it fills up again.
 
 ### Access
 
@@ -185,7 +211,8 @@ The chart's default password is never used. No anonymous access.
 
 - **Firing alerts** (for health checks): Alertmanager API through the port-forward above,
   `GET http://localhost:9093/api/v2/alerts`. **No `Watchdog` in the answer means monitoring is
-  broken**, not "no alerts": if Prometheus is down, Alertmanager resolves everything within minutes.
+  broken**, not "no alerts": `Watchdog` fires only while Prometheus writes fresh data, and if
+  Prometheus is down or stuck, Alertmanager resolves everything within minutes.
 - **Applications with ServiceMonitor/PodMonitor/PrometheusRule/Probe:** picked up in any namespace
   without any labels (their selectors and namespace selectors are `{}`). `ScrapeConfig` is the
   exception: it still needs the label `release: kube-prometheus-stack` (chart default).

@@ -19,6 +19,36 @@ kube-prometheus-stack:
   kubeProxy:
     enabled: false
 
+  # --- Control plane metrics: k3s serves them anyway -------------------------------------------
+  # The k3s server is one process with one metrics registry: the kubelet's /metrics on rpi-01 and the
+  # apiserver endpoint both return apiserver_*, etcd_*, scheduler_*, workqueue_* ... Through the
+  # kubelet that was ~45k duplicate series (of ~100k), and every operator with CRDs adds more
+  # (histograms are labelled by API group and resource).
+  kubeApiServer:
+    serviceMonitor:
+      # Overriding the list replaces the chart's default, so its rule (first) is copied from 91.9.0.
+      metricRelabelings:
+        - action: drop
+          regex: (etcd_request|apiserver_request_slo|apiserver_request_sli|apiserver_request)_duration_seconds_bucket;(0\.15|0\.2|0\.3|0\.35|0\.4|0\.45|0\.6|0\.7|0\.8|0\.9|1\.25|1\.5|1\.75|2|3|3\.5|4|4\.5|6|7|8|9|15|20|40|45|50)(\.0)?
+          sourceLabels: [__name__, le]
+        # Histograms no chart rule or dashboard reads (~11k series). The SLO rules (burn rate,
+        # availability) and the apiserver dashboard use apiserver_request_sli_duration_seconds — kept.
+        - action: drop
+          regex: apiserver_request_duration_seconds_bucket|apiserver_request_body_size_bytes_bucket|apiserver_response_sizes_bucket|apiserver_watch_.*_bucket
+          sourceLabels: [__name__]
+  kubelet:
+    serviceMonitor:
+      # Applies to the kubelet's /metrics endpoint only (cAdvisor and probes have their own keys).
+      # An allowlist, not a denylist: a k3s upgrade brings new metric families, and a denylist
+      # would let them through. The list = what the kubelet dashboard and chart rules read.
+      metricRelabelings:
+        - action: drop # chart default (91.9.0), copied because this list replaces it
+          sourceLabels: [__name__, le]
+          regex: (csi_operations|storage_operation_duration)_seconds_bucket;(0.25|2.5|15|25|120|600)(\.0)?
+        - action: keep
+          sourceLabels: [__name__]
+          regex: kubelet_.*|process_.*|go_.*|volume_.*|storage_operation_.*|prober_.*|rest_client_requests_total|rest_client_request_duration_seconds_bucket
+
   defaultRules:
     rules:
       # Rule groups for the targets disabled above — they would only produce "target down" noise.
@@ -33,6 +63,9 @@ kube-prometheus-stack:
       # 25–95% of CFS periods throttled in short bursts while idle. Info severity, no action to take;
       # real starvation shows up as failing probes and restarts (KubePodCrashLooping, KubePodNotReady).
       CPUThrottlingHigh: true
+      # The default is `vector(1)`: it keeps firing while Prometheus is up but writes nothing
+      # (full TSDB, stuck compaction). Replaced by the lab's Watchdog in group `monitoring` below.
+      Watchdog: true
 
   # --- Lab rules: the single place for cluster-level rules of this lab -------------------------
   # Application rules (e.g. slo-operator) ship their own PrometheusRule objects instead.
@@ -83,6 +116,35 @@ kube-prometheus-stack:
                 description: Check with `kubectl describe certificate {{ $labels.name }} -n {{ $labels.exported_namespace }}`.
         - name: monitoring
           rules:
+            - alert: Watchdog
+              # Heartbeat that depends on data: fires only while fresh samples are written.
+              # When ingestion stops, `up` goes stale within 5 minutes and the alert resolves.
+              # Same name and severity as the chart's, so Alertmanager's routing of it is unchanged.
+              expr: vector(1) and on() (count(up{job="apiserver"} == 1) > 0)
+              labels:
+                severity: none
+              annotations:
+                summary: Heartbeat — Prometheus is writing data
+                description: Always firing while Prometheus ingests samples. Its absence means monitoring is broken.
+            - alert: PrometheusSeriesHigh
+              # Budget: ~45k series after the kubelet allowlist; TSDB space is sized for it.
+              expr: prometheus_tsdb_head_series{job="kube-prometheus-stack-prometheus"} > 75000
+              for: 1h
+              labels:
+                severity: warning
+              annotations:
+                summary: Prometheus has {{ $value | humanize }} series (budget 75k)
+                description: TSDB space in tmpfs is sized for the budget. Find the source with `topk(20, count by (__name__, job)({__name__=~".+"}))` and relabel it.
+            - alert: PrometheusTSDBNearlyFull
+              # Blocks + WAL against the tmpfs sizeLimit (1.5Gi). retentionSize keeps them near 1.1GB;
+              # more means retention cannot keep up and the volume will fill.
+              expr: (prometheus_tsdb_storage_blocks_bytes{job="kube-prometheus-stack-prometheus"} + prometheus_tsdb_wal_storage_size_bytes{job="kube-prometheus-stack-prometheus"}) > 0.85 * 1.5 * 1024^3
+              for: 15m
+              labels:
+                severity: warning
+              annotations:
+                summary: Prometheus TSDB uses {{ $value | humanize1024 }}B of 1.5GiB tmpfs
+                description: Check `prometheus_tsdb_compactions_failed_total` and the WAL size. Runbook in README (Monitoring, TSDB full).
             - alert: MonitoringContainerOOMKilled
               # After an OOM the in-memory TSDB is empty, so restart-based alerts never fire.
               # kube-state-metrics reports the last termination reason, which survives the restart.
@@ -157,19 +219,28 @@ kube-prometheus-stack:
       ruleNamespaceSelector: {}
       probeNamespaceSelector: {}
 
-      # TSDB in tmpfs. retentionSize stays below sizeLimit so Prometheus trims before the volume is full.
+      # TSDB in tmpfs. retentionSize counts blocks + WAL + head chunks but frees only blocks.
+      # Sized 2026-10-08 for ~45k series: WAL peaks ~310MB, head chunks ~50MB, 3 days of blocks
+      # ~550–610MB → retentionSize 1100MB, peak ~1.18GB with compaction (~77% of 1.5Gi).
       retention: 3d
-      retentionSize: 768MB
+      retentionSize: 1100MB
       storageSpec:
         emptyDir:
           medium: Memory
-          sizeLimit: 1Gi
+          sizeLimit: 1.5Gi
+      # Each head compaction preallocates a chunk segment of this size before writing the block.
+      # The default (512MiB) failed as soon as less than 512MiB of the tmpfs was free; compaction then
+      # never succeeded again, the WAL was never truncated and filled the volume. Hidden flag of
+      # Prometheus (must be > 1MB); a 2h block is ~20–35MB.
+      additionalArgs:
+        - name: storage.tsdb.max-block-chunk-segment-size
+          value: 64MB
 
-      # tmpfs counts against the container memory limit: limit = working memory + sizeLimit (1Gi).
-      # Peak 73m / 1152Mi with 6.5 h of TSDB; tmpfs grows up to retentionSize over 3 days — kept as is.
+      # tmpfs counts against the container memory limit: limit = working memory + sizeLimit (1.5Gi).
+      # Peak 73m / 1152Mi with 6.5 h of TSDB (2026-10-06).
       resources:
         requests: { cpu: 200m, memory: 1Gi }
-        limits: { cpu: "1", memory: 2560Mi }
+        limits: { cpu: "1", memory: 3072Mi }
 
   # --- Alertmanager ----------------------------------------------------------------------------
   # Receiver is the chart default `null`: alerts are visible in the UI and API (/api/v2/alerts).
