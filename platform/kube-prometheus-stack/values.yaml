@@ -384,12 +384,16 @@ kube-prometheus-stack:
             - bot_token_file: /etc/alertmanager/secrets/alertmanager-telegram/bot-token
               chat_id_file: /etc/alertmanager/secrets/alertmanager-telegram/chat-id
               send_resolved: true
+              parse_mode: HTML
+              message: '{{ template "telegram.lab.message" . }}'
         - name: telegram-silent
           telegram_configs:
             - bot_token_file: /etc/alertmanager/secrets/alertmanager-telegram/bot-token
               chat_id_file: /etc/alertmanager/secrets/alertmanager-telegram/chat-id
               send_resolved: true
               disable_notifications: true
+              parse_mode: HTML
+              message: '{{ template "telegram.lab.message" . }}'
         - name: healthchecks-watchdog
           webhook_configs:
             - url_file: /etc/alertmanager/secrets/alertmanager-telegram/watchdog-url
@@ -400,6 +404,44 @@ kube-prometheus-stack:
               send_resolved: false
       templates:
         - '/etc/alertmanager/config/*.tmpl'
+    # Telegram message: what happened and where, not every label. Runbook as a link; the chart's
+    # generatorURL points to the in-cluster Prometheus and is left out. Values are HTML-escaped.
+    # Check after a change: README, Alert delivery.
+    templateFiles:
+      telegram.tmpl: |-
+        {{/* One alert: name, what happened, the labels that tell where, runbook as a link. */}}
+        {{ define "telegram.lab.alert" -}}
+        <b>{{ .Labels.alertname | html }}</b>
+        {{ with .Annotations.description }}{{ . | html }}{{ else }}{{ with .Annotations.summary }}{{ . | html }}{{ end }}{{ end }}
+        {{- $where := .Labels.Remove (stringSlice "alertname" "severity" "namespace" "prometheus" "job" "endpoint" "service" "container" "instance" "uid" "reason" "metrics_path" "device" "fstype") }}
+        {{- if eq .Labels.job "node-exporter" }}{{ $where = $where.Remove (stringSlice "pod") }}{{ end }}
+        {{- if $where }}
+        <i>{{ range $i, $p := $where.SortedPairs }}{{ if $i }} · {{ end }}{{ $p.Name }}: {{ $p.Value | html }}{{ end }}</i>
+        {{- end }}
+        {{- with .Annotations.runbook_url }}
+        <a href="{{ . | html }}">runbook</a>
+        {{- end }}
+        {{- end }}
+
+        {{/* The whole message: header, up to 8 firing alerts, then the names of resolved ones.
+             Telegram cuts at 4096 characters, which would break the HTML. */}}
+        {{ define "telegram.lab.message" -}}
+        {{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}🔴{{ else }}🟡{{ end }}{{ else }}✅{{ end }}
+        {{- " " }}<b>{{ if eq .Status "firing" }}{{ with .CommonLabels.severity }}{{ . }}{{ else }}firing{{ end }}{{ else }}resolved{{ end }}</b>
+        {{- with .CommonLabels.namespace }} · {{ . }}{{ end }}
+        {{- range $i, $a := .Alerts.Firing }}{{ if lt $i 8 }}
+
+        {{ if not $.CommonLabels.severity }}[{{ $a.Labels.severity }}] {{ end }}{{ template "telegram.lab.alert" $a }}
+        {{- end }}{{ end }}
+        {{- if gt (len .Alerts.Firing) 8 }}
+
+        … {{ len .Alerts.Firing }} firing in total — /api/v2/alerts
+        {{- end }}
+        {{- if .Alerts.Resolved }}
+
+        {{ if eq .Status "firing" }}✅ {{ end }}{{ range $i, $a := .Alerts.Resolved }}{{ if $i }}, {{ end }}{{ $a.Labels.alertname | html }}{{ end }}
+        {{- end }}
+        {{- end }}
     alertmanagerSpec:
       secrets: [alertmanager-telegram]
       replicas: 1
@@ -463,6 +505,12 @@ kube-prometheus-stack:
     # Cost: network counters are those of the pod's network namespace, not of the node's interfaces.
     # hostPID and read-only host /proc, /sys and / stay — CPU, memory and filesystems are the node's.
     hostNetwork: false
+    # Without hostNetwork `instance` is the pod IP; `node` names the Pi in alerts (/run full on rpi-01).
+    prometheus:
+      monitor:
+        relabelings:
+          - sourceLabels: [__meta_kubernetes_pod_node_name]
+            targetLabel: node
     resources:
       requests: { cpu: 10m, memory: 32Mi } # peak 5m / 26Mi
       limits: { cpu: 200m, memory: 64Mi }

@@ -234,6 +234,11 @@ The chart's default password is never used. No anonymous access.
   not writing — and the service notifies through **its own** Telegram integration and e-mail, not
   through the lab's bot. Check "delivery broken" gets a `/fail` signal on
   `Alertmanager(Cluster)FailedToSendAlerts{integration="telegram"}`.
+- **Message format:** template `telegram.lab.message` (`alertmanager.templateFiles` in `values.yaml`):
+  severity and namespace, then per alert its name, description, the labels that tell where
+  (node, pod, mountpoint …) and the runbook as a link; at most 8 alerts, resolved ones by name only.
+  Telegram parses it as HTML, so a broken tag means **no message at all** — preview a change with
+  `amtool template render --template.glob=telegram.tmpl --template.data=<alerts.json> --template.text='{{ template "telegram.lab.message" . }}'`.
 - Credentials: Secret `alertmanager-telegram` (bot token, `chat_id`, two ping URLs), created by hand
   (Bootstrap), reference copy in the password manager. Routes are in `values.yaml`.
 - **Telegram is notifications, not a log.** After a power loss (marker: "back up" from
