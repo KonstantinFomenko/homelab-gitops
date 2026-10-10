@@ -13,8 +13,12 @@ vault:
 
   server:
     # One node, integrated storage (Raft). No HA: the only consumer is External Secrets Operator,
-    # and the Kubernetes Secrets it writes survive Vault being sealed or down. Unseal is manual
-    # (Shamir keys in a password manager), so every extra replica would be one more manual unseal.
+    # and the Kubernetes Secrets it writes survive Vault being sealed or down.
+    # Auto-unseal through AWS KMS (seal "awskms" below): Vault unseals itself on every start while
+    # the internet, the clock and the key are there. The Shamir keys became recovery keys: they
+    # authorise generate-root, they do NOT unseal Vault when KMS is unreachable.
+    # The StatefulSet uses OnDelete (chart default): a change here takes effect only after
+    # `kubectl delete pod -n vault vault-0`.
     ha:
       enabled: true
       replicas: 1
@@ -27,8 +31,14 @@ vault:
 
           # Vault 2.0 requires a token for sys/generate-root (CVE-2026-5807). The root token is
           # revoked after setup, so without this a new one could never be generated from the
-          # unseal keys. Risk: someone inside the cluster can start/cancel the ceremony, not finish it.
+          # recovery keys. Risk: someone inside the cluster can start/cancel the ceremony, not finish it.
           enable_unauthenticated_access = ["generate-root"]
+
+          # Every parameter comes from the environment (Secret vault-kms, extraSecretEnvironmentVars
+          # below): the key ARN holds the account number and stays out of git. Environment variables
+          # win over this file. Deleting the KMS key loses Vault and every snapshot taken since
+          # the migration (README, Secrets and certificates).
+          seal "awskms" {}
 
           listener "tcp" {
             address         = "[::]:8200"
@@ -55,6 +65,13 @@ vault:
         readOnly: true
     extraEnvironmentVars:
       VAULT_CACERT: /vault/userconfig/vault-tls/ca.crt
+    # Hand-made Secret (README, Bootstrap), reference copy in the password manager.
+    extraSecretEnvironmentVars:
+      - { envName: VAULT_SEAL_TYPE, secretName: vault-kms, secretKey: VAULT_SEAL_TYPE }
+      - { envName: VAULT_AWSKMS_SEAL_KEY_ID, secretName: vault-kms, secretKey: VAULT_AWSKMS_SEAL_KEY_ID }
+      - { envName: AWS_REGION, secretName: vault-kms, secretKey: AWS_REGION }
+      - { envName: AWS_ACCESS_KEY_ID, secretName: vault-kms, secretKey: AWS_ACCESS_KEY_ID }
+      - { envName: AWS_SECRET_ACCESS_KEY, secretName: vault-kms, secretKey: AWS_SECRET_ACCESS_KEY }
 
     nodeSelector:
       node-role: app

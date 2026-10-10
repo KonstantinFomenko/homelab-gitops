@@ -165,12 +165,12 @@ kube-prometheus-stack:
           rules:
             - alert: VaultNotReady
               # Vault has no metrics yet; its readiness probe fails while it is sealed, so this
-              # catches "sealed" as well as "down". Sealed after a power loss is normal until
-              # auto-unseal, hence warning. Runbook: README, Contracts.
+              # catches "sealed" as well as "down". With auto-unseal a sealed Vault is an outage
+              # (no internet, clock or KMS key), hence critical. Runbook: README, Contracts.
               expr: max by (namespace, pod) (kube_pod_status_ready{namespace="vault",condition="true"}) == 0
               for: 15m
               labels:
-                severity: warning
+                severity: critical
               annotations:
                 summary: Vault pod {{ $labels.pod }} is not Ready
                 description: Sealed or down for 15 minutes; External Secrets cannot refresh secrets. Check with `kubectl exec -n vault {{ $labels.pod }} -- vault status`.

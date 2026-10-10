@@ -60,17 +60,21 @@ kubectl create secret generic alertmanager-telegram -n monitoring \
   --from-literal=bot-token='<from the password manager>' --from-literal=chat-id='<from the password manager>' \
   --from-literal=watchdog-url='<ping URL of check "cluster alive">' \
   --from-literal=failed-url='<ping URL of check "delivery broken">/fail'
+kubectl create namespace vault            # auto-unseal credentials, before the first start of Vault
+kubectl create secret generic vault-kms -n vault --from-literal=VAULT_SEAL_TYPE=awskms \
+  --from-literal=VAULT_AWSKMS_SEAL_KEY_ID='<key ARN>' --from-literal=AWS_REGION='<key region>' \
+  --from-literal=AWS_ACCESS_KEY_ID='<user vault-unseal>' --from-literal=AWS_SECRET_ACCESS_KEY='<user vault-unseal>'
 kubectl apply -f bootstrap/root.yaml      # the only manual apply, once
 ```
 
 Within a few minutes `root` picks up `apps/argocd.yaml` and Argo CD adopts its own objects
 (no pod restarts — the render is identical).
 
-Then Vault (initialise and unseal it — the runbook "Vault lost" of the private repository): its
+Then Vault (initialise it with recovery keys — the runbook "Vault lost" of the private repository): its
 `policies.sh` first (it enables Kubernetes auth), then `vault/platform-policies.sh` from here, then
 the showcase values from the password manager (Secrets of the showcase). Until then
 `platform-secrets` is `Degraded`, `tailscale-operator` `Progressing` and Grafana waits for
-`grafana-admin` — the signal "unseal Vault and fill `platform/*`" (Expected statuses).
+`grafana-admin` — the signal "initialise Vault and fill `platform/*`" (Expected statuses).
 
 The same `helm template … | kubectl apply --server-side --force-conflicts` is the **emergency path**
 when a bad values change has broken Argo CD: fix `values.yaml` locally, run it, push the fix.
@@ -98,9 +102,9 @@ Argo CD or GitHub is down.
 
 | Situation | Applications | Alerts |
 |---|---|---|
-| Vault sealed (after every power loss until unsealed) | `vault` `Progressing`; `platform-secrets` and apps with ESO `Degraded` — their `SecretStore`s cannot reach Vault. The Secrets themselves stay (`CreatedOnce`), running services are unaffected | `VaultNotReady`, "Application not Synced/Healthy" for those apps, Vault pod alerts — until unsealed (auto-unseal will remove this) |
+| Vault sealed — an outage since auto-unseal: no internet, wrong clock, or KMS key / credentials broken | `vault` `Progressing`; `platform-secrets` and apps with ESO `Degraded` — their `SecretStore`s cannot reach Vault. The Secrets themselves stay (`CreatedOnce`), running services are unaffected | `VaultNotReady` (`critical`), "Application not Synced/Healthy" for those apps, Vault pod alerts — react per Contracts |
 | Tailscale operator down | `tailscale-operator` `Progressing`/`Degraded`, the rest `Healthy` | "Application not Synced/Healthy" after 15 min |
-| Bootstrap from scratch, before unseal | `platform-secrets` `Degraded`, `tailscale-operator` `Progressing` | the same — unseal Vault, fill `platform/*` |
+| Bootstrap from scratch, before `vault operator init` | `platform-secrets` `Degraded`, `tailscale-operator` `Progressing` | the same — initialise Vault, fill `platform/*` |
 
 ## UI access
 
@@ -242,15 +246,31 @@ of Secret `homelab-ca` in `cert-manager` (public). Losing the CA key means a new
 
 **Vault** — one node, integrated storage (Raft) on the app node, TLS only (certificate `vault-tls`
 from `homelab-ca`, 1 year). No HA on purpose: the only consumer is External Secrets Operator, and the
-Kubernetes Secrets it writes survive Vault being sealed or down. Unseal is manual (Shamir, 3 keys,
-threshold 2, kept in a password manager) — a sealed Vault does not stop running workloads. Raft data
-sits on the SD card (`local-path`) **without backup**: the reference copy of every value is the
-password manager, so losing Vault means re-initialising it and re-entering the values.
-- The root token is revoked after setup; `generate-root` from the unseal keys is enabled without a
+Kubernetes Secrets it writes survive Vault being sealed or down — a sealed Vault does not stop running
+workloads. Raft data sits on the SD card (`local-path`) **without backup**: the reference copy of every
+value is the password manager, so losing Vault means re-initialising it and re-entering the values.
+- **Auto-unseal through AWS KMS** (`seal "awskms"`): Vault unseals itself on every start. Key,
+  region and the credentials of IAM user `vault-unseal` (only `kms:Encrypt`, `kms:Decrypt`,
+  `kms:DescribeKey` on that key) come from the hand-made Secret `vault-kms` (Bootstrap) as
+  environment variables; reference copy in the password manager. The former Shamir keys (3, threshold
+  2) are **recovery keys**: they authorise `generate-root`, they cannot unseal Vault without KMS.
+- **Egress of Vault:** 443 to the AWS KMS endpoint of the key's region (`kms.<region>.amazonaws.com`),
+  so DNS (CoreDNS) and a correct clock (requests are signed with a timestamp; the RPis have no RTC,
+  NTP must sync first) — needed by a future default-deny policy in `vault`.
+- **Never delete the KMS key** (and keep the AWS account): without it Vault cannot be unsealed and
+  no snapshot taken since the migration can be restored — recovery keys do not help. AWS keeps a
+  scheduled deletion cancellable for the waiting period: always 30 days. A Raft snapshot together
+  with `vault-kms` opens every secret — keep them apart.
+- **Vault sealed** (`VaultNotReady`, `critical`): check in this order — internet on rpi-02;
+  the clock (`timedatectl` on the node: `System clock synchronized: yes`); key and credentials from
+  the Mac (`aws kms describe-key` with the `vault-unseal` credentials, `KeyState Enabled`); then
+  delete the pod. Key or account lost — the runbook "Vault lost" of the private repository.
+- The root token is revoked after setup; `generate-root` from the recovery keys is enabled without a
   token (`enable_unauthenticated_access`, Vault 2.0 requires one by default — CVE-2026-5807).
-- The StatefulSet uses `OnDelete`: a config change takes effect after deleting the pod, then unseal.
+- The StatefulSet uses `OnDelete`: a config change takes effect after deleting the pod; Vault
+  unseals itself.
 - cert-manager renews `vault-tls` 30 days ahead; Vault reads it on `kubectl exec -n vault vault-0 --
-  sh -c 'kill -HUP $(pidof vault)'` (no restart, no unseal) or on any restart of the pod. **No alert catches a forgotten
+  sh -c 'kill -HUP $(pidof vault)'` (no restart) or on any restart of the pod. **No alert catches a forgotten
   SIGHUP:** `CertificateExpiresSoon` sees the renewed Secret, while Vault keeps serving the old
   certificate until it expires — then External Secrets can no longer sync (Application `Degraded`).
   Hence a calendar reminder for the renewal date (`kubectl get certificate vault-tls -n vault`,
@@ -420,9 +440,10 @@ a password manager. The chart's default password is never used. No anonymous acc
 - **Severity → when I react:** `critical` — the same day (it may wake me); `warning` — by Saturday's
   review; `info` — not delivered. Routes match on severity only: an application that needs its own
   receiver ships an `AlertmanagerConfig` in its namespace.
-- **Vault not Ready** (`VaultNotReady`, `warning`, 15 min): sealed or down — External Secrets cannot
-  refresh secrets, running workloads are unaffected. Sealed after a power loss is expected until
-  auto-unseal: unseal it (Secrets and certificates). Not Ready while unsealed: `kubectl describe pod`.
+- **Vault not Ready** (`VaultNotReady`, `critical`, 15 min): sealed or down — External Secrets cannot
+  refresh secrets, running workloads are unaffected. With auto-unseal a sealed Vault is an outage: no
+  internet, wrong clock or KMS key / credentials broken — the order of checks is in "Vault sealed"
+  (Secrets and certificates). Not Ready while unsealed: `kubectl describe pod`.
 - **Egress of Alertmanager:** 443 to `api.telegram.org` and `hc-ping.com` — needed by a future
   default-deny policy in `monitoring`.
 
