@@ -316,7 +316,7 @@ kube-prometheus-stack:
   # Routes match on severity only — an application that needs its own route ships an
   # AlertmanagerConfig in its namespace.
   alertmanager:
-    # Replaces the chart's config: inhibit_rules (but the last) and the `null` receiver are copied
+    # Replaces the chart's config: all inhibit_rules but the last and the `null` receiver are copied
     # from 91.9.0.
     config:
       global:
