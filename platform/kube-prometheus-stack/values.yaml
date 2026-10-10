@@ -316,7 +316,8 @@ kube-prometheus-stack:
   # Routes match on severity only — an application that needs its own route ships an
   # AlertmanagerConfig in its namespace.
   alertmanager:
-    # Replaces the chart's config: inhibit_rules and the `null` receiver are copied from 91.9.0.
+    # Replaces the chart's config: inhibit_rules (but the last) and the `null` receiver are copied
+    # from 91.9.0.
     config:
       global:
         resolve_timeout: 5m
@@ -331,6 +332,12 @@ kube-prometheus-stack:
           target_matchers: ['severity = info']
           equal: ['namespace']
         - target_matchers: ['alertname = InfoInhibitor']
+        # The lab's own: while Vault is sealed or down, its pod, StatefulSet and PDB alerts are
+        # consequences — one cause in four blocks. Inhibited, not disabled: with Vault up they fire.
+        - source_matchers: ['alertname = VaultNotReady']
+          target_matchers:
+            - 'alertname =~ "KubePodNotReady|KubeStatefulSetReplicasMismatch|KubePdbNotEnoughHealthyPods"'
+          equal: ['namespace']
       # Asia/Tbilisi is where the lab's owner sleeps; change on relocation.
       time_intervals:
         - name: night
