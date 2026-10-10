@@ -459,12 +459,17 @@ kube-prometheus-stack:
   grafana:
     nodeSelector:
       node-role: data
-    # Admin credentials from a Secret created by hand before the first sync (README, Bootstrap).
-    # The chart's default password is public and never used.
+    # Admin credentials from Secret grafana-admin, made by External Secrets from Vault
+    # (platform/platform-secrets). The chart's default password is public and never used.
     admin:
       existingSecret: grafana-admin
       userKey: admin-user
       passwordKey: admin-password
+    # GF_SERVER_ROOT_URL (the tailnet address, kept out of git) from Secret grafana-server, made by
+    # External Secrets (platform/platform-secrets). Optional: without it Grafana still starts.
+    envFromSecrets:
+      - name: grafana-server
+        optional: true
     # sqlite (sessions, settings) in tmpfs; dashboards come from ConfigMaps via the sidecar.
     persistence:
       enabled: false

@@ -1,0 +1,25 @@
+# UIs of the monitoring stack at https://<host>.<tailnet domain> — each Ingress is its own proxy and
+# tailnet machine (tag:k8s). The certificate is Let's Encrypt's, issued through Tailscale.
+# They live here, not in kube-prometheus-stack: Argo CD reports an Ingress healthy only once the
+# operator has filled its status, so an operator outage turns only this Application yellow.
+# Prometheus and Alertmanager have no login of their own: the tailnet policy is their only guard
+# (autogroup:member -> tag:k8s:443).
+{{- range $host, $svc := dict "grafana" (list "kube-prometheus-stack-grafana" "http-web") "prometheus" (list "kube-prometheus-stack-prometheus" "http-web") "alertmanager" (list "kube-prometheus-stack-alertmanager" "http-web") }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $host }}
+  namespace: monitoring
+  annotations:
+    tailscale.com/proxy-class: homelab
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: {{ index $svc 0 }}
+      port:
+        name: {{ index $svc 1 }}
+  tls:
+    - hosts: [{{ $host }}] # the tailnet machine name; without it the operator picks none
+{{- end }}
