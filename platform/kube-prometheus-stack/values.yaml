@@ -118,7 +118,11 @@ kube-prometheus-stack:
         - name: argocd
           rules:
             - alert: ArgoCDApplicationNotSyncedOrHealthy
-              expr: argocd_app_info{sync_status!="Synced"} or argocd_app_info{health_status!="Healthy"}
+              # Only the labels a reader needs; argocd_app_info also carries repo, project, destination …
+              expr: |
+                max by (namespace, name, sync_status, health_status) (
+                  argocd_app_info{sync_status!="Synced"} or argocd_app_info{health_status!="Healthy"}
+                )
               for: 15m
               labels:
                 severity: warning
@@ -163,7 +167,7 @@ kube-prometheus-stack:
               # Vault has no metrics yet; its readiness probe fails while it is sealed, so this
               # catches "sealed" as well as "down". Sealed after a power loss is normal until
               # auto-unseal, hence warning. Runbook: README, Contracts.
-              expr: kube_pod_status_ready{namespace="vault",condition="true"} == 0
+              expr: max by (namespace, pod) (kube_pod_status_ready{namespace="vault",condition="true"}) == 0
               for: 15m
               labels:
                 severity: warning
@@ -312,7 +316,8 @@ kube-prometheus-stack:
   # Routes match on severity only — an application that needs its own route ships an
   # AlertmanagerConfig in its namespace.
   alertmanager:
-    # Replaces the chart's config: inhibit_rules and the `null` receiver are copied from 91.9.0.
+    # Replaces the chart's config: all inhibit_rules but the last and the `null` receiver are copied
+    # from 91.9.0.
     config:
       global:
         resolve_timeout: 5m
@@ -327,6 +332,12 @@ kube-prometheus-stack:
           target_matchers: ['severity = info']
           equal: ['namespace']
         - target_matchers: ['alertname = InfoInhibitor']
+        # The lab's own: while Vault is sealed or down, its pod, StatefulSet and PDB alerts are
+        # consequences — one cause in four blocks. Inhibited, not disabled: with Vault up they fire.
+        - source_matchers: ['alertname = VaultNotReady']
+          target_matchers:
+            - 'alertname =~ "KubePodNotReady|KubeStatefulSetReplicasMismatch|KubePdbNotEnoughHealthyPods"'
+          equal: ['namespace']
       # Asia/Tbilisi is where the lab's owner sleeps; change on relocation.
       time_intervals:
         - name: night
@@ -412,9 +423,11 @@ kube-prometheus-stack:
         {{/* One alert: name, what happened, the labels that tell where, runbook as a link. */}}
         {{ define "telegram.lab.alert" -}}
         <b>{{ .Labels.alertname | html }}</b>
-        {{ with .Annotations.description }}{{ . | html }}{{ else }}{{ with .Annotations.summary }}{{ . | html }}{{ end }}{{ end }}
+        {{- /* The chart's descriptions end with "on cluster <label>"; the lab has no cluster label. */}}
+        {{ with .Annotations.description }}{{ reReplaceAll " on cluster \\." "." . | html }}{{ else }}{{ with .Annotations.summary }}{{ . | html }}{{ end }}{{ end }}
         {{- $where := .Labels.Remove (stringSlice "alertname" "severity" "namespace" "prometheus" "job" "endpoint" "service" "container" "instance" "uid" "reason" "metrics_path" "device" "fstype") }}
-        {{- if eq .Labels.job "node-exporter" }}{{ $where = $where.Remove (stringSlice "pod") }}{{ end }}
+        {{- /* pod of the exporter that was scraped, not of the object the alert is about. */}}
+        {{- if or (eq .Labels.job "node-exporter") (match "^(kube-prometheus-stack-kube-state-metrics-|argocd-application-controller-)" .Labels.pod) }}{{ $where = $where.Remove (stringSlice "pod") }}{{ end }}
         {{- if $where }}
         <i>{{ range $i, $p := $where.SortedPairs }}{{ if $i }} · {{ end }}{{ $p.Name }}: {{ $p.Value | html }}{{ end }}</i>
         {{- end }}
