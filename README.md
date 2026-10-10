@@ -227,15 +227,22 @@ The chart's default password is never used. No anonymous access.
 
 ### Alert delivery
 
-- **Telegram:** a private channel; the lab's own bot is its only poster. All alerts except `info`.
+- **Telegram:** a private channel; the lab's own bot posts the alerts, healthchecks' bot posts the
+  dead-man's switch (below). All alerts except `info`.
   `critical` — with sound at any time; everything else — with sound by day and **without sound
   23:00–08:00 `Asia/Tbilisi`** (`disable_notifications`, nothing is dropped; an alert spanning 23:00
   or 08:00 comes twice). Grouped by namespace, repeated every 12 h, resolved notifications on.
 - **Dead-man's switch (healthchecks.io):** `Watchdog` pings check "cluster alive" every 5 minutes.
   No ping for 30 minutes — power loss, rpi-03 down, Prometheus or Alertmanager stopped, Prometheus
-  not writing — and the service notifies through **its own** Telegram integration and e-mail, not
-  through the lab's bot. Check "delivery broken" gets a `/fail` signal on
-  `Alertmanager(Cluster)FailedToSendAlerts{integration="telegram"}`.
+  not writing — and the service notifies through **its own** Telegram bot (in the same channel and
+  in a direct chat) and e-mail, not through the lab's bot. Check "delivery broken" gets a `/fail`
+  signal on `Alertmanager(Cluster)FailedToSendAlerts{integration="telegram"}`; it never gets regular
+  pings (period 365 days), so it stays down until reset by hand.
+- **After "delivery broken":** fix the cause (e.g. a new token, then delete the Alertmanager pod),
+  check that a test alert arrives, and **wait until `AlertmanagerFailedToSendAlerts` has resolved**
+  (its rate window is 15 minutes; a restarted Alertmanager starts empty and sends `/fail` again while
+  the alert still fires). Then reset the check: `curl -fsS <check URL without /fail>` → `OK`. The
+  URL without `/fail` is in the password manager; the Secret holds the `/fail` one.
 - **Message format:** template `telegram.lab.message` (`alertmanager.templateFiles` in `values.yaml`):
   severity and namespace, then per alert its name, description, the labels that tell where
   (node, pod, mountpoint …) and the runbook as a link; at most 8 alerts, resolved ones by name only.
