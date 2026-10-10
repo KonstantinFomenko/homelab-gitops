@@ -444,7 +444,7 @@ kube-prometheus-stack:
         {{- end }}
     alertmanagerSpec:
       secrets: [alertmanager-telegram]
-      replicas: 0 # TEMP SPEC-035 6(v): dead-man test, revert after the healthchecks notice
+      replicas: 1
       nodeSelector:
         node-role: data
       # Silences live here and are lost on restart — never silence, disable rules in values instead.
