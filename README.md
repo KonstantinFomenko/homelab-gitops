@@ -98,7 +98,7 @@ Argo CD or GitHub is down.
 
 | Situation | Applications | Alerts |
 |---|---|---|
-| Vault sealed (after every power loss until unsealed) | all `Healthy` — the showcase Secrets are synced once (`CreatedOnce`) | `VaultNotReady` only |
+| Vault sealed (after every power loss until unsealed) | `vault` `Progressing`; `platform-secrets` and apps with ESO `Degraded` — their `SecretStore`s cannot reach Vault. The Secrets themselves stay (`CreatedOnce`), running services are unaffected | `VaultNotReady`, "Application not Synced/Healthy" for those apps, Vault pod alerts — until unsealed (auto-unseal will remove this) |
 | Tailscale operator down | `tailscale-operator` `Progressing`/`Degraded`, the rest `Healthy` | "Application not Synced/Healthy" after 15 min |
 | Bootstrap from scratch, before unseal | `platform-secrets` `Degraded`, `tailscale-operator` `Progressing` | the same — unseal Vault, fill `platform/*` |
 
@@ -279,8 +279,9 @@ never depend on ESO.
   on `platform/<namespace>`; another namespace gets `403 permission denied`.
 - **Reference copy** of every value: the password manager. Vault has no backup.
 - **Synced once** (`refreshPolicy: CreatedOnce`): a sealed Vault after a power loss never turns
-  these ExternalSecrets or `platform-secrets` `Degraded`. The price — ESO never updates an
-  existing Secret. **Changing a value:**
+  these ExternalSecrets `Degraded` and never touches their Secrets. The `SecretStore`s still are
+  re-validated every few minutes and go `Degraded` while Vault is sealed, and with them
+  `platform-secrets` (Expected statuses). The price — ESO never updates an existing Secret. **Changing a value:**
   ```sh
   pbpaste | kubectl exec -i -n vault vault-0 -- vault kv patch platform/<namespace> <key>=-
   kubectl delete secret <secret> -n <namespace>         # ESO recreates it within seconds
