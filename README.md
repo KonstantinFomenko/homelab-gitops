@@ -11,9 +11,12 @@ bootstrap/root.yaml          # root Application — the only manifest ever appli
 apps/                        # one Application per component; root syncs everything here
   argocd.yaml                #   → platform/argocd (Argo CD manages itself)
   kube-prometheus-stack.yaml #   → platform/kube-prometheus-stack (monitoring)
+  tailscale-operator.yaml    #   → platform/tailscale-operator (UIs at HTTPS addresses in the tailnet)
+  platform-secrets.yaml      #   → platform/platform-secrets (showcase Secrets from Vault)
 platform/<component>/        # the component itself
   Chart.yaml / Chart.lock    #   umbrella Helm chart: upstream chart as a dependency, version pinned here
   values.yaml                #   all settings, under the dependency's key
+vault/platform-policies.sh   # Vault mount platform/ and a read-only role per showcase namespace
 ```
 
 **One source per component.** A component's version and settings live only in `platform/<component>/`.
@@ -21,7 +24,7 @@ Its `Application` in `apps/` points at that path in this repository, so Argo CD 
 `helm template` render exactly the same thing. No multi-source Applications.
 
 Argo CD runs on the control-plane node (`node-role=control-plane`, with a toleration for its
-`NoSchedule` taint), without Dex, notifications or an ingress. There is no Helm release in the
+`NoSchedule` taint), without Dex or notifications; its UI is published by the Tailscale operator. There is no Helm release in the
 cluster: Argo CD is the only owner of its objects; `helm install/upgrade` are never used.
 
 | Application | Path | Sync policy |
@@ -32,6 +35,8 @@ cluster: Argo CD is the only owner of its objects; `helm install/upgrade` are ne
 | `cert-manager` | `platform/cert-manager` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
 | `vault` | `platform/vault` | automated, `selfHeal`, `prune`; no finalizer (data) |
 | `external-secrets` | `platform/external-secrets` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
+| `tailscale-operator` | `platform/tailscale-operator` | automated, `selfHeal`, `prune`; no finalizer (CRDs); `ServerSideApply` |
+| `platform-secrets` | `platform/platform-secrets` | automated, `selfHeal`, `prune`; no finalizer (Secrets in use); `SkipDryRunOnMissingResource` |
 
 ## Bootstrap from scratch (= disaster recovery)
 
@@ -40,14 +45,17 @@ before it joins the cluster.
 
 Needs `kubectl` with cluster-admin and `helm` (used only as a renderer).
 
+**Before the first sync, in the Tailscale admin console:** delete every machine tagged `tag:k8s`
+(the proxies of the old cluster). Their state lived in Secrets of the lost cluster; while the old
+machines hold the names, new proxies come up as `argocd-1`, `grafana-1`, … The tailnet policy
+(UI access) and the operator's OAuth client survive — they are outside the cluster.
+
 ```sh
 kubectl create namespace argocd
 helm dependency build platform/argocd
 helm template argocd platform/argocd -n argocd | kubectl apply --server-side --force-conflicts -f -
 kubectl -n argocd rollout status deploy --timeout=5m
-kubectl create namespace monitoring       # both Secrets must exist before the first sync
-kubectl create secret generic grafana-admin -n monitoring \
-  --from-literal=admin-user=admin --from-literal=admin-password='<from the password manager>'
+kubectl create namespace monitoring       # the Secret must exist before the first sync
 kubectl create secret generic alertmanager-telegram -n monitoring \
   --from-literal=bot-token='<from the password manager>' --from-literal=chat-id='<from the password manager>' \
   --from-literal=watchdog-url='<ping URL of check "cluster alive">' \
@@ -57,6 +65,12 @@ kubectl apply -f bootstrap/root.yaml      # the only manual apply, once
 
 Within a few minutes `root` picks up `apps/argocd.yaml` and Argo CD adopts its own objects
 (no pod restarts — the render is identical).
+
+Then Vault (initialise and unseal it — the runbook "Vault lost" of the private repository): its
+`policies.sh` first (it enables Kubernetes auth), then `vault/platform-policies.sh` from here, then
+the showcase values from the password manager (Secrets of the showcase). Until then
+`platform-secrets` is `Degraded`, `tailscale-operator` `Progressing` and Grafana waits for
+`grafana-admin` — the signal "unseal Vault and fill `platform/*`" (Expected statuses).
 
 The same `helm template … | kubectl apply --server-side --force-conflicts` is the **emergency path**
 when a bad values change has broken Argo CD: fix `values.yaml` locally, run it, push the fix.
@@ -80,18 +94,126 @@ fresh (minutes old). A dead application controller leaves the last status in pla
 After a power loss everything comes back on its own; running workloads are not touched while
 Argo CD or GitHub is down.
 
+**Expected statuses** (next to the `health.sh` contract):
+
+| Situation | Applications | Alerts |
+|---|---|---|
+| Vault sealed (after every power loss until unsealed) | all `Healthy` — the showcase Secrets are synced once (`CreatedOnce`) | `VaultNotReady` only |
+| Tailscale operator down | `tailscale-operator` `Progressing`/`Degraded`, the rest `Healthy` | "Application not Synced/Healthy" after 15 min |
+| Bootstrap from scratch, before unseal | `platform-secrets` `Degraded`, `tailscale-operator` `Progressing` | the same — unseal Vault, fill `platform/*` |
+
 ## UI access
 
-Day to day: the tailnet address of Argo CD (Tailscale operator, see below). Emergency path when
-the operator or its proxy is down — argocd-server speaks plain HTTP (`server.insecure`):
+Every UI has an HTTPS address in the tailnet, `https://<name>.<tailnet domain>`, with a Let's Encrypt
+certificate issued through Tailscale. Nothing is exposed to the internet; without Tailscale on the
+client the names do not even resolve.
+
+| Name | Service | Login |
+|---|---|---|
+| `argocd` | `argocd-server` (`argocd`) | `admin` (password manager); CLI `argocd login <address> --grpc-web` |
+| `grafana` | `kube-prometheus-stack-grafana` (`monitoring`) | `grafana-admin` |
+| `prometheus` | `kube-prometheus-stack-prometheus` (`monitoring`) | none — the tailnet policy is the only guard |
+| `alertmanager` | `kube-prometheus-stack-alertmanager` (`monitoring`) | none — the tailnet policy is the only guard |
+
+**How:** the [Tailscale Kubernetes operator](https://tailscale.com/kb/1236/kubernetes-operator)
+(`platform/tailscale-operator`, namespace `tailscale`, on the control-plane node). Each `Ingress` with
+`ingressClassName: tailscale` and `tls.hosts: [<name>]` becomes one proxy pod and one tailnet machine
+tagged `tag:k8s`; the proxy terminates TLS and forwards plain HTTP inside the cluster. Proxy placement
+and resources come from `ProxyClass` `homelab` (annotation `tailscale.com/proxy-class: homelab`), their
+state (node key, certificate) from Secrets in `tailscale` — no PVCs. The `Ingress`es live in the
+operator's chart, not in the components': Argo CD reports an `Ingress` healthy only once the operator
+has filled its status, so an operator outage turns only `tailscale-operator` yellow. One proxy per
+address (~50–100 MiB each on the control-plane node); more than five addresses or less than 1 GiB
+available there → switch to a shared `ProxyGroup`.
+
+Grafana's absolute links need its full address, which names the tailnet and stays out of git:
+`GF_SERVER_ROOT_URL` comes from Vault (Secrets of the showcase). Argo CD's own `url` is not set for
+the same reason; the only effect is that `argocd logout` cannot revoke the token on the server.
+
+Certificates are renewed by Tailscale; there is no expiry metric — a browser warning is the signal,
+`port-forward` the way around. They are logged in Certificate Transparency, so the machine names are
+public (no access follows from that). Let's Encrypt allows 5 duplicate certificates a week: do not
+recreate the proxies in a loop.
+
+**Tailnet policy** (admin console, outside git; a copy before each change goes to the password
+manager). Written as a whole — the default `*:*` would give cluster pods (`tag:k8s`) a way to the
+client devices and, through the subnet router, to the whole LAN:
+
+```jsonc
+{
+  "tagOwners": {
+    "tag:k8s-operator": ["autogroup:admin"],
+    "tag:k8s":          ["tag:k8s-operator"],
+  },
+  "hosts": {
+    "subnet-router": "<tailnet IP of the control-plane node>",
+    "client":        "<tailnet IP of a client device>",   // tests only
+    "lab-lan":       "<LAN>/24",
+    "lab-pods":      "10.42.0.0/16",                      // k3s defaults
+    "lab-services":  "10.43.0.0/16",
+  },
+  "grants": [
+    // My devices -> the cluster (kubectl, SSH, health checks).
+    {"src": ["autogroup:member"], "dst": ["subnet-router", "lab-lan", "lab-pods", "lab-services"], "ip": ["*"]},
+    // My devices -> the UIs.
+    {"src": ["autogroup:member"], "dst": ["tag:k8s"], "ip": ["tcp:443"]},
+    // Nothing with tag:k8s or tag:k8s-operator as source.
+  ],
+  "ssh": [
+    {"action": "check", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot", "root"]},
+  ],
+  "tests": [  // saving fails if any of these break
+    {"src": "client",  "accept": ["subnet-router:22", "<API server LAN IP>:<API port>", "tag:k8s:443"]},
+    {"src": "tag:k8s", "deny":   ["subnet-router:22", "<API server LAN IP>:<API port>", "client:22", "client:443"]},
+  ],
+}
+```
+
+After a change: `kubectl get nodes` and SSH to the subnet router from the client at once; anything
+broken → paste the saved policy back. Machines tagged `tag:k8s*` are not visible in a client's
+`tailscale status` (the policy gives no access to them) — list them in the admin console or the API.
+
+**Operator's OAuth client** (admin console → OAuth clients): scopes Devices → Core, Keys → Auth Keys,
+General → Services, **each switched to Write** (a ticked scope defaults to Read and the operator then
+fails), tag `tag:k8s-operator`. No expiry. Check it without starting the operator — a token exchange
+must return the three scopes without `:read`:
+
+```sh
+curl -s -d client_id=<id> -d client_secret=<secret> https://api.tailscale.com/api/v2/oauth/token
+```
+
+**Emergency path** when the operator or a proxy is down — argocd-server speaks plain HTTP
+(`server.insecure`):
 
 ```sh
 kubectl port-forward svc/argocd-server -n argocd 8080:80    # http://localhost:8080, user admin
 argocd login localhost:8080 --plaintext --grpc-web          # CLI over the same port-forward
 ```
 
-The initial `admin` password is read once from `argocd-initial-admin-secret`, stored in a password
-manager, and the secret is deleted (as the Argo CD docs recommend).
+Monitoring UIs: Monitoring › Access. The initial `admin` password of Argo CD is read once from
+`argocd-initial-admin-secret`, stored in a password manager, and the secret is deleted (as the Argo CD
+docs recommend).
+
+### Rollback (remove the Tailscale operator)
+
+Ingresses first, while the operator still runs: it deletes their proxies and tailnet machines.
+
+```sh
+git rm apps/tailscale-operator.yaml       # no finalizer: everything stays in the cluster for now
+# and set server.insecure back to false in platform/argocd/values.yaml
+git commit && git push                    # root prunes the Application only
+kubectl delete ingress argocd -n argocd
+kubectl delete ingress grafana prometheus alertmanager -n monitoring
+kubectl get statefulset -n tailscale      # wait until no ts-* is left
+kubectl delete namespace tailscale        # the operator and its state
+kubectl get crd -o name | grep tailscale.com | xargs kubectl delete
+```
+
+Then: orphaned `tag:k8s` machines → delete in the admin console; revoke the OAuth client; remove
+ExternalSecrets `operator-oauth` and `grafana-server` from `platform/platform-secrets`, `platform/tailscale`
+from Vault and `tailscale` from `vault/platform-policies.sh` (the role stays until deleted by hand).
+`grafana-admin` stays on External Secrets. The tailnet policy can stay — it grants nothing without
+`tag:k8s` machines.
 
 ## Adding a component
 
@@ -102,6 +224,9 @@ manager, and the secret is deleted (as the Argo CD docs recommend).
 4. The component has metrics or CRDs → note `prometheus_tsdb_head_series` before and after in the
    PR description. Every CRD adds apiserver series (histograms are labelled by API group and
    resource); the TSDB is sized for a budget of 75k (Monitoring).
+5. The component has a web UI → its tailnet address in the same change: an `Ingress` in
+   `platform/tailscale-operator/templates/` (copy `ingress-monitoring.yaml`), checked in a browser.
+   No `port-forward` as the way in. A UI without its own login is guarded only by the tailnet policy.
 
 **Finalizer rule.** `resources-finalizer.argocd.argoproj.io` (delete the file → delete the
 resources) only on components **without CRDs and without data**. Components with CRDs or data
@@ -134,6 +259,33 @@ password manager, so losing Vault means re-initialising it and re-entering the v
 **External Secrets Operator** — namespaced `SecretStore`s only (cluster-wide stores and push secrets
 are disabled): every namespace logs in to Vault with its own Kubernetes-auth role and reads only its
 own path. Secrets in the k3s datastore are encrypted at rest (`secrets-encryption` on the server).
+
+### Secrets of the showcase (Vault `platform/`)
+
+The showcase services keep no hand-made Secrets: values are in Vault under `platform/<namespace>`,
+External Secrets writes them into the cluster. One Application, `platform-secrets`, holds every
+`SecretStore` and `ExternalSecret` of the showcase, so the operator, monitoring and Argo CD charts
+never depend on ESO.
+
+| Vault path | Keys | Secret (namespace) | Used by |
+|---|---|---|---|
+| `platform/tailscale` | `client_id`, `client_secret` | `operator-oauth` (`tailscale`) | the operator |
+| `platform/monitoring` | `grafana-root-url` | `grafana-server` → `GF_SERVER_ROOT_URL` (`monitoring`) | Grafana (optional `envFrom`) |
+| `platform/monitoring` | `admin-user`, `admin-password` | `grafana-admin` (`monitoring`) | Grafana admin login |
+
+- **Roles:** `vault/platform-policies.sh` (idempotent; needs a Vault admin token and Kubernetes auth,
+  which the private repository's `policies.sh` enables — run it after that one). Role
+  `platform-<namespace>` = service account `default` of that namespace, audience `vault`, read-only
+  on `platform/<namespace>`; another namespace gets `403 permission denied`.
+- **Reference copy** of every value: the password manager. Vault has no backup.
+- **Synced once** (`refreshPolicy: CreatedOnce`): a sealed Vault after a power loss never turns
+  these ExternalSecrets or `platform-secrets` `Degraded`. The price — ESO never updates an
+  existing Secret. **Changing a value:**
+  ```sh
+  pbpaste | kubectl exec -i -n vault vault-0 -- vault kv patch platform/<namespace> <key>=-
+  kubectl delete secret <secret> -n <namespace>         # ESO recreates it within seconds
+  kubectl rollout restart deploy/<consumer> -n <namespace>   # env and mounts are read at start
+  ```
 
 ## Monitoring
 
@@ -213,7 +365,9 @@ history is lost (tmpfs). Then find out why compaction failed before it fills up 
 
 ### Access
 
-No ingress. Over the private network:
+Day to day: `https://grafana.<tailnet domain>`, `https://prometheus.<tailnet domain>`,
+`https://alertmanager.<tailnet domain>` (UI access). Emergency path when the operator or a proxy is
+down:
 
 ```sh
 kubectl port-forward svc/kube-prometheus-stack-grafana -n monitoring 3000:80          # http://localhost:3000
@@ -221,9 +375,9 @@ kubectl port-forward svc/kube-prometheus-stack-prometheus -n monitoring 9090:909
 kubectl port-forward svc/kube-prometheus-stack-alertmanager -n monitoring 9093:9093   # http://localhost:9093
 ```
 
-Grafana login comes from the `grafana-admin` Secret (keys `admin-user`, `admin-password`), created
-by hand before the first sync (see Bootstrap) with a random password kept in a password manager.
-The chart's default password is never used. No anonymous access.
+Grafana login comes from the `grafana-admin` Secret (keys `admin-user`, `admin-password`), made by
+External Secrets from Vault `platform/monitoring` (Secrets of the showcase), a random password kept in
+a password manager. The chart's default password is never used. No anonymous access.
 
 ### Alert delivery
 
@@ -271,8 +425,8 @@ The chart's default password is never used. No anonymous access.
 - **Egress of Alertmanager:** 443 to `api.telegram.org` and `hc-ping.com` — needed by a future
   default-deny policy in `monitoring`.
 
-- **Firing alerts** (for health checks): Alertmanager API through the port-forward above,
-  `GET http://localhost:9093/api/v2/alerts`. **No `Watchdog` in the answer means monitoring is
+- **Firing alerts** (for health checks): Alertmanager API, `GET https://alertmanager.<tailnet domain>/api/v2/alerts`
+  (or `http://localhost:9093/api/v2/alerts` through the port-forward above). **No `Watchdog` in the answer means monitoring is
   broken**, not "no alerts": `Watchdog` fires only while Prometheus writes fresh data, and if
   Prometheus is down or stuck, Alertmanager resolves everything within minutes.
 - **Applications with ServiceMonitor/PodMonitor/PrometheusRule/Probe:** picked up in any namespace
@@ -306,8 +460,11 @@ kubectl get crd -o name | grep monitoring.coreos.com | xargs kubectl delete
 ```
 
 Deleting the CRDs also deletes every `PrometheusRule`/`ServiceMonitor` of other applications.
-Reinstall: recreate `grafana-admin` and `alertmanager-telegram` from the password manager (Bootstrap), restore
-the file, push.
+Deleting the namespace also removes the showcase's `SecretStore` and ExternalSecrets there and the
+Ingresses `grafana`, `prometheus`, `alertmanager` (with their tailnet machines).
+Reinstall: recreate `alertmanager-telegram` from the password manager (Bootstrap), restore the file,
+push; once the namespace exists, `platform-secrets` and `tailscale-operator` restore their objects
+(selfHeal) and ESO recreates `grafana-admin` and `grafana-server` — Vault must be unsealed.
 
 ## Rollback (remove Argo CD)
 
