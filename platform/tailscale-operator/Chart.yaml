@@ -1,0 +1,9 @@
+apiVersion: v2
+name: tailscale-operator
+description: Tailscale Kubernetes operator for the home lab — umbrella chart around the official chart, plus the lab's ProxyClass and the Ingresses of the UIs
+type: application
+version: 0.1.0
+dependencies:
+  - name: tailscale-operator
+    version: 1.102.4
+    repository: https://pkgs.tailscale.com/helmcharts

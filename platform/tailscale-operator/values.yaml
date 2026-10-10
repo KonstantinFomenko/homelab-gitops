@@ -1,0 +1,24 @@
+tailscale-operator:
+  # No oauth.clientId/clientSecret here: the chart mounts Secret operator-oauth, made by External
+  # Secrets from Vault platform/tailscale (platform/platform-secrets). Until it exists the operator
+  # pod waits in ContainerCreating and starts on its own.
+  # No nameOverride/fullnameOverride: the Secret name and the operator's state depend on the names.
+  operatorConfig:
+    # Tailscale is the control-plane node's role (it is also the tailnet's subnet router).
+    # Overriding nodeSelector drops the chart default, so os is set again.
+    nodeSelector:
+      node-role: control-plane
+      kubernetes.io/os: linux
+    tolerations:
+      - key: node-role
+        operator: Equal
+        value: control-plane
+        effect: NoSchedule
+    image:
+      # The tag is pinned by the chart version; Always would block a restart without internet.
+      pullPolicy: IfNotPresent
+    # Starting values; set from a day of measurements (SPEC-026, step 8).
+    resources:
+      requests: { cpu: 20m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  # Proxies: tag:k8s (chart default), placement and resources from ProxyClass homelab (templates/).

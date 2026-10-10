@@ -1,0 +1,26 @@
+# Settings of every proxy the operator creates (one StatefulSet and one tailnet machine per Ingress).
+# Attached with the annotation tailscale.com/proxy-class: homelab on each Ingress.
+# Proxy state (the node key) lives in a Secret in namespace tailscale: no PVC, nothing on SD cards.
+apiVersion: tailscale.com/v1alpha1
+kind: ProxyClass
+metadata:
+  name: homelab
+  annotations:
+    # The CRD comes with this chart in the same sync.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  statefulSet:
+    pod:
+      nodeSelector:
+        node-role: control-plane
+        kubernetes.io/os: linux
+      tolerations:
+        - key: node-role
+          operator: Equal
+          value: control-plane
+          effect: NoSchedule
+      tailscaleContainer:
+        # Starting values; set from a day of measurements (SPEC-026, step 8).
+        resources:
+          requests: { cpu: 10m, memory: 48Mi }
+          limits: { memory: 192Mi }

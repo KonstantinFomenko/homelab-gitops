@@ -14,13 +14,15 @@
 # Values are never here: they are put by hand from the password manager (README, Secrets).
 set -eu
 
-# Namespaces with a SecretStore in platform/platform-secrets/templates/.
+# Namespaces with a SecretStore in platform/platform-secrets/.
 namespaces="tailscale monitoring"
 
 v() { kubectl exec -n vault vault-0 -- vault "$@"; }
 vin() { kubectl exec -i -n vault vault-0 -- vault "$@"; }
 
-if ! v auth list -format=json | grep -q '"kubernetes/"'; then
+# Run on its own first: a missing admin token or a sealed Vault stops here with Vault's own error.
+auths=$(v auth list -format=json)
+if ! printf '%s' "$auths" | grep -q '"kubernetes/"'; then
   echo "Kubernetes auth is not enabled: run vault/policies.sh of the private repository first" >&2
   exit 1
 fi
