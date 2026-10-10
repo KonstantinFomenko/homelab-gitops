@@ -82,10 +82,12 @@ Argo CD or GitHub is down.
 
 ## UI access
 
-No ingress. Over the private network:
+Day to day: the tailnet address of Argo CD (Tailscale operator, see below). Emergency path when
+the operator or its proxy is down — argocd-server speaks plain HTTP (`server.insecure`):
 
 ```sh
-kubectl port-forward svc/argocd-server -n argocd 8080:443   # https://localhost:8080, user admin
+kubectl port-forward svc/argocd-server -n argocd 8080:80    # http://localhost:8080, user admin
+argocd login localhost:8080 --plaintext --grpc-web          # CLI over the same port-forward
 ```
 
 The initial `admin` password is read once from `argocd-initial-admin-secret`, stored in a password

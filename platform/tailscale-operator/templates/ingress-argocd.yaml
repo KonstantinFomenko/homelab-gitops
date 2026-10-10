@@ -1,0 +1,19 @@
+# Argo CD UI and API (grpc-web) at https://argocd.<tailnet domain> — its own proxy and tailnet machine.
+# argocd-server runs with server.insecure (platform/argocd): this proxy terminates TLS.
+# Here, not in platform/argocd: Argo CD must never wait for the operator to become healthy.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    tailscale.com/proxy-class: homelab
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: argocd-server
+      port:
+        name: http
+  tls:
+    - hosts: [argocd] # the tailnet machine name; without it the operator picks none

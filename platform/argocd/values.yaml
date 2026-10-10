@@ -20,6 +20,15 @@ argo-cd:
   notifications:
     enabled: false
 
+  # The UI is reached through the Tailscale operator's proxy (Ingress argocd in
+  # platform/tailscale-operator), which terminates TLS with a Let's Encrypt certificate. Inside the
+  # cluster argocd-server speaks plain HTTP (ClusterIP only; node-to-node traffic is WireGuard).
+  # Emergency path: kubectl port-forward to http://localhost:8080; CLI `argocd login localhost:8080
+  # --plaintext --grpc-web` (plain HTTP: without --plaintext the CLI tries TLS and fails).
+  configs:
+    params:
+      server.insecure: true
+
   # Single redis without HA and without persistence.
   redis-ha:
     enabled: false
