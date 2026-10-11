@@ -20,7 +20,7 @@ spec:
           value: control-plane
           effect: NoSchedule
       tailscaleContainer:
-        # Starting values; set from a day of measurements (SPEC-026, step 8).
+        # Measured over 24 h on 2026-10-11 (SPEC-026, step 8): peak 45Mi, 4m CPU per proxy — kept with headroom.
         resources:
           requests: { cpu: 10m, memory: 48Mi }
           limits: { memory: 192Mi }

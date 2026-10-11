@@ -17,7 +17,7 @@ tailscale-operator:
     image:
       # The tag is pinned by the chart version; Always would block a restart without internet.
       pullPolicy: IfNotPresent
-    # Starting values; set from a day of measurements (SPEC-026, step 8).
+    # Measured over 24 h on 2026-10-11 (SPEC-026, step 8): peak 38Mi, 8m CPU — kept with headroom.
     resources:
       requests: { cpu: 20m, memory: 64Mi }
       limits: { memory: 256Mi }
