@@ -396,6 +396,16 @@ kubectl port-forward svc/kube-prometheus-stack-prometheus -n monitoring 9090:909
 kubectl port-forward svc/kube-prometheus-stack-alertmanager -n monitoring 9093:9093   # http://localhost:9093
 ```
 
+Without a UI (scripts, checks from a laptop): the Prometheus image has no `wget` or `curl`, so
+`kubectl exec` does not work. Query through the API server's service proxy instead:
+
+```sh
+kubectl get --raw "/api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy/api/v1/query?query=<URL-encoded PromQL>"
+```
+
+For example `time() - prometheus_tsdb_lowest_timestamp_seconds` (history depth) or
+`ALERTS{alertstate="firing"}`.
+
 Grafana login comes from the `grafana-admin` Secret (keys `admin-user`, `admin-password`), made by
 External Secrets from Vault `platform/monitoring` (Secrets of the showcase), a random password kept in
 a password manager. The chart's default password is never used. No anonymous access.
