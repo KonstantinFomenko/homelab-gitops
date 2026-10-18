@@ -309,10 +309,11 @@ kube-prometheus-stack:
 
   # --- Alertmanager ----------------------------------------------------------------------------
   # Delivery: Telegram (a private channel of the lab's own bot) and an external dead-man's switch
-  # (healthchecks.io). Routes live here, in git; only the credentials come from the hand-made Secret
-  # `alertmanager-telegram` (README, Bootstrap), mounted at /etc/alertmanager/secrets/<name>/<key>.
-  # Moves to Vault + External Secrets once Vault unseals itself (SPEC-036): the channel for outages
-  # must not depend on a component that stays sealed after every power loss.
+  # (healthchecks.io). Routes live here, in git; only the credentials come from Secret
+  # `alertmanager-telegram` — Vault platform/monitoring/alertmanager through External Secrets, synced
+  # once (platform/platform-secrets, README: Secrets of the showcase) — mounted at
+  # /etc/alertmanager/secrets/<name>/<key>. No Secret, no pod: the emergency command is in README,
+  # Alert delivery.
   # Routes match on severity only — an application that needs its own route ships an
   # AlertmanagerConfig in its namespace.
   alertmanager:
