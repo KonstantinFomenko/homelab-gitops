@@ -55,11 +55,6 @@ kubectl create namespace argocd
 helm dependency build platform/argocd
 helm template argocd platform/argocd -n argocd | kubectl apply --server-side --force-conflicts -f -
 kubectl -n argocd rollout status deploy --timeout=5m
-kubectl create namespace monitoring       # the Secret must exist before the first sync
-kubectl create secret generic alertmanager-telegram -n monitoring \
-  --from-literal=bot-token='<from the password manager>' --from-literal=chat-id='<from the password manager>' \
-  --from-literal=watchdog-url='<ping URL of check "cluster alive">' \
-  --from-literal=failed-url='<ping URL of check "delivery broken">/fail'
 kubectl create namespace vault            # auto-unseal credentials, before the first start of Vault
 kubectl create secret generic vault-kms -n vault --from-literal=VAULT_SEAL_TYPE=awskms \
   --from-literal=VAULT_AWSKMS_SEAL_KEY_ID='<key ARN>' --from-literal=AWS_REGION='<key region>' \
@@ -73,8 +68,11 @@ Within a few minutes `root` picks up `apps/argocd.yaml` and Argo CD adopts its o
 Then Vault (initialise it with recovery keys — the runbook "Vault lost" of the private repository): its
 `policies.sh` first (it enables Kubernetes auth), then `vault/platform-policies.sh` from here, then
 the showcase values from the password manager (Secrets of the showcase). Until then
-`platform-secrets` is `Degraded`, `tailscale-operator` `Progressing` and Grafana waits for
-`grafana-admin` — the signal "initialise Vault and fill `platform/*`" (Expected statuses).
+`platform-secrets` is `Degraded`, `tailscale-operator` `Progressing`, Grafana waits for
+`grafana-admin` and Alertmanager for `alertmanager-telegram` — the signal "initialise Vault and fill
+`platform/*`" (Expected statuses). The order is Vault → its values → ESO → the Secrets; no Secret of
+the showcase is created by hand. With no Alertmanager there is no `Watchdog`, so check "cluster alive"
+goes down: pause it in healthchecks before a rebuild, resume once alerts arrive.
 
 The same `helm template … | kubectl apply --server-side --force-conflicts` is the **emergency path**
 when a bad values change has broken Argo CD: fix `values.yaml` locally, run it, push the fix.
@@ -104,7 +102,7 @@ Argo CD or GitHub is down.
 |---|---|---|
 | Vault sealed — an outage since auto-unseal: no internet, wrong clock, or KMS key / credentials broken | `vault` `Progressing`; `platform-secrets` and apps with ESO `Degraded` — their `SecretStore`s cannot reach Vault. The Secrets themselves stay (`CreatedOnce`), running services are unaffected | `VaultNotReady` (`critical`), "Application not Synced/Healthy" for those apps, Vault pod alerts — react per Contracts |
 | Tailscale operator down | `tailscale-operator` `Progressing`/`Degraded`, the rest `Healthy` | "Application not Synced/Healthy" after 15 min |
-| Bootstrap from scratch, before `vault operator init` | `platform-secrets` `Degraded`, `tailscale-operator` `Progressing` | the same — initialise Vault, fill `platform/*` |
+| Bootstrap from scratch, before `vault operator init` | `platform-secrets` `Degraded`, `tailscale-operator` `Progressing`, `kube-prometheus-stack` `Progressing` — Alertmanager in `ContainerCreating` until `alertmanager-telegram` exists | none from the lab (no Alertmanager); healthchecks "cluster alive" down unless paused — initialise Vault, fill `platform/*` |
 
 ## UI access
 
@@ -287,11 +285,29 @@ External Secrets writes them into the cluster. One Application, `platform-secret
 `SecretStore` and `ExternalSecret` of the showcase, so the operator, monitoring and Argo CD charts
 never depend on ESO.
 
-| Vault path | Keys | Secret (namespace) | Used by |
-|---|---|---|---|
-| `platform/tailscale` | `client_id`, `client_secret` | `operator-oauth` (`tailscale`) | the operator |
-| `platform/monitoring` | `grafana-root-url` | `grafana-server` → `GF_SERVER_ROOT_URL` (`monitoring`) | Grafana (optional `envFrom`) |
-| `platform/monitoring` | `admin-user`, `admin-password` | `grafana-admin` (`monitoring`) | Grafana admin login |
+| Vault path | Keys | What to enter from the password manager | Secret (namespace) | Used by |
+|---|---|---|---|---|
+| `platform/tailscale` | `client_id`, `client_secret` | as stored | `operator-oauth` (`tailscale`) | the operator |
+| `platform/monitoring` | `grafana-root-url` | as stored | `grafana-server` → `GF_SERVER_ROOT_URL` (`monitoring`) | Grafana (optional `envFrom`) |
+| `platform/monitoring` | `admin-user`, `admin-password` | as stored | `grafana-admin` (`monitoring`) | Grafana admin login |
+| `platform/monitoring/alertmanager` | `bot-token`, `chat-id`, `watchdog-url`, `failed-url` | as stored, except **`failed-url` = ping URL of check "delivery broken" + `/fail`** (stored without it). Without `/fail` the check never goes down — the only signal of broken delivery is silently off | `alertmanager-telegram` (`monitoring`) | Alertmanager (files) |
+
+This table is the one list of the showcase's keys; other runbooks link here.
+
+- **Entering values:** a new record — `kv put` with the first key only, the others with `kv patch`,
+  one key per command (`<key>=-` reads stdin for a single value). `kv put` on an existing record
+  replaces it as a whole and silently drops the keys of other consumers — `CreatedOnce` hides that
+  until the Secret is recreated. Hence one record per consumer under `platform/<namespace>/<consumer>`
+  for new ones (the role reads the subpaths too).
+  ```sh
+  printf %s "$(pbpaste)" | kubectl exec -i -n vault vault-0 -- vault kv put   platform/<path> <first key>=-
+  printf %s "$(pbpaste)" | kubectl exec -i -n vault vault-0 -- vault kv patch platform/<path> <key>=-
+  ```
+- **Ownership:** ESO owns these Secrets (`creationPolicy: Owner`, `ownerReferences` → the
+  ExternalSecret). `platform-secrets` prunes: renaming a file or an object there deletes the
+  ExternalSecret, and its Secret goes with it — the service keeps running until its next restart and
+  then cannot start. For `alertmanager-telegram` that is the outage channel: rename only with the
+  emergency command (Alert delivery) at hand.
 
 - **Roles:** `vault/platform-policies.sh` (idempotent; needs a Vault admin token and Kubernetes auth,
   which the private repository's `policies.sh` enables — run it after that one). Role
@@ -301,12 +317,15 @@ never depend on ESO.
 - **Synced once** (`refreshPolicy: CreatedOnce`): a sealed Vault after a power loss never turns
   these ExternalSecrets `Degraded` and never touches their Secrets. The `SecretStore`s still are
   re-validated every few minutes and go `Degraded` while Vault is sealed, and with them
-  `platform-secrets` (Expected statuses). The price — ESO never updates an existing Secret. **Changing a value:**
+  `platform-secrets` (Expected statuses). The price — ESO never updates an existing Secret. **Changing a value**
+  — first check that the `SecretStore` is `Ready` (`kubectl get secretstore vault -n <namespace>`):
+  with Vault unreachable the deleted Secret is not recreated. Then:
   ```sh
-  pbpaste | kubectl exec -i -n vault vault-0 -- vault kv patch platform/<namespace> <key>=-
+  printf %s "$(pbpaste)" | kubectl exec -i -n vault vault-0 -- vault kv patch platform/<path> <key>=-
   kubectl delete secret <secret> -n <namespace>         # ESO recreates it within seconds
   kubectl rollout restart deploy/<consumer> -n <namespace>   # env and mounts are read at start
   ```
+  Alertmanager is a StatefulSet: delete its pod instead of `rollout restart`.
 
 ## Monitoring
 
@@ -433,17 +452,32 @@ a password manager. The chart's default password is never used. No anonymous acc
   (node, pod, mountpoint …) and the runbook as a link; at most 8 alerts, resolved ones by name only.
   Telegram parses it as HTML, so a broken tag means **no message at all** — preview a change with
   `amtool template render --template.glob=telegram.tmpl --template.data=<alerts.json> --template.text='{{ template "telegram.lab.message" . }}'`.
-- Credentials: Secret `alertmanager-telegram` (bot token, `chat_id`, two ping URLs), created by hand
-  (Bootstrap), reference copy in the password manager. Routes are in `values.yaml`.
+- Credentials: Secret `alertmanager-telegram` (bot token, `chat_id`, two ping URLs) from Vault
+  `platform/monitoring/alertmanager` through ESO, synced once (Secrets of the showcase — keys and what
+  to enter). Reference copy in the password manager. Routes are in `values.yaml`.
+- **Vault lost and alerts needed now** — the emergency path, the only hand-made `alertmanager-telegram`:
+  ```sh
+  kubectl create secret generic alertmanager-telegram -n monitoring \
+    --from-literal=bot-token='<from the password manager>' --from-literal=chat-id='<from the password manager>' \
+    --from-literal=watchdog-url='<ping URL of check "cluster alive">' \
+    --from-literal=failed-url='<ping URL of check "delivery broken">/fail'
+  kubectl delete pod -n monitoring alertmanager-kube-prometheus-stack-alertmanager-0
+  ```
+  Once Vault is back with its values, ESO takes this Secret over in place (same values, the pod does
+  not notice). Check: `kubectl get secret alertmanager-telegram -n monitoring -o jsonpath='{.metadata.ownerReferences[0].kind}'`
+  → `ExternalSecret`.
 - **Telegram is notifications, not a log.** After a power loss (marker: "back up" from
   healthchecks) earlier firing messages without a resolved one are unreliable — the truth is
   `/api/v2/alerts`.
 - **Planned work longer than 30 minutes** (node maintenance, cluster upgrade): pause check
   "cluster alive" in healthchecks first, resume after.
-- **Leaked bot token:** revoke it in BotFather → new token to the password manager → edit
-  `bot-token` in the Secret → `kubectl delete pod -n monitoring alertmanager-kube-prometheus-stack-alertmanager-0`
-  → check that a test alert arrives. **Leaked ping URL:** new URL in healthchecks → Secret → delete
-  the pod. The Secret is read through files, so a changed value needs the pod restart.
+- **Leaked bot token** (react the same day): revoke it in BotFather → new token to the password
+  manager → `SecretStore` `vault` in `monitoring` `Ready` → `kv patch` of `bot-token` → delete Secret
+  `alertmanager-telegram` (ESO recreates it) → `kubectl delete pod -n monitoring alertmanager-kube-prometheus-stack-alertmanager-0`
+  → check that a test alert arrives (Changing a value, Secrets of the showcase). **Leaked ping URL:**
+  new URL in healthchecks → password manager → `kv patch` → delete the Secret and the pod. Vault
+  unreachable — the emergency path above. The Secret is read through files, so a changed value needs
+  the pod restart.
 
 ### Contracts
 
@@ -490,16 +524,17 @@ before every version bump: a major version usually means new CRDs. They are appl
 git rm apps/kube-prometheus-stack.yaml && git commit && git push   # no finalizer: resources stay
 helm dependency build platform/kube-prometheus-stack
 helm template kube-prometheus-stack platform/kube-prometheus-stack -n monitoring | kubectl delete --ignore-not-found -f -
-kubectl delete namespace monitoring                                 # also deletes grafana-admin, alertmanager-telegram
+kubectl delete namespace monitoring                                 # also deletes the ExternalSecrets and their Secrets
 kubectl get crd -o name | grep monitoring.coreos.com | xargs kubectl delete
 ```
 
 Deleting the CRDs also deletes every `PrometheusRule`/`ServiceMonitor` of other applications.
 Deleting the namespace also removes the showcase's `SecretStore` and ExternalSecrets there and the
 Ingresses `grafana`, `prometheus`, `alertmanager` (with their tailnet machines).
-Reinstall: recreate `alertmanager-telegram` from the password manager (Bootstrap), restore the file,
-push; once the namespace exists, `platform-secrets` and `tailscale-operator` restore their objects
-(selfHeal) and ESO recreates `grafana-admin` and `grafana-server` — Vault must be unsealed.
+Reinstall: restore the file, push; once the namespace exists, `platform-secrets` and
+`tailscale-operator` restore their objects (selfHeal) and ESO recreates `grafana-admin`,
+`grafana-server` and `alertmanager-telegram` from Vault — Vault must be unsealed. Until then
+Alertmanager stays in `ContainerCreating`; Vault unavailable — the emergency path (Alert delivery).
 
 ## Rollback (remove Argo CD)
 
