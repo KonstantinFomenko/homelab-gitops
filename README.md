@@ -456,6 +456,9 @@ a password manager. The chart's default password is never used. No anonymous acc
   exception: it still needs the label `release: kube-prometheus-stack` (chart default).
 - **History:** rule windows must not exceed the retention (3d), and after a Prometheus restart long
   windows are unreliable until they refill. 28–30 day SLO periods and error budgets need remote write.
+  The TSDB lives in tmpfs, so the history actually available is **the time since the last restart
+  or power loss**, at most 3d: in October 2026 the stretches between power losses were ~5 hours to
+  ~1.5 days, and the 3-day depth was never reached. Size and retention are set for 3d (~0.9GB of 1.1GB `retentionSize`).
 - **NetworkPolicy of an application:** Prometheus lives in namespace `monitoring`; allow ingress from
   ```yaml
   - namespaceSelector:
